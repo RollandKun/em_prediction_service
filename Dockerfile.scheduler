@@ -1,0 +1,19 @@
+# em_prediction_service - Dockerfile for Scheduler container
+FROM python:3.12.4-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq-dev gcc && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY requirements_lock.txt /app/
+RUN pip install --no-cache-dir -r requirements_lock.txt
+
+COPY config.py database.py /app/
+COPY pipeline/ /app/pipeline/
+COPY ingestion/ /app/ingestion/
+COPY scheduler/ /app/scheduler/
+COPY models/ /app/models/
+
+CMD ["python", "-m", "scheduler.main"]
