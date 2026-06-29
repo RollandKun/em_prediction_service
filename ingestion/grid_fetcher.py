@@ -246,6 +246,7 @@ def _fetch_from_api(target_date: date) -> list[dict]:
     print(f"  [API] 发现 {len(echarts_lists)} 个数据组: {echarts_lists}")
 
     series_by_code = {}
+    d1_series = {}       # D-1 预测数据（实时数据为空时兜底）
     time_labels = None
 
     for list_key in echarts_lists:
@@ -259,26 +260,29 @@ def _fetch_from_api(target_date: date) -> list[dict]:
             y_vals = s.get('yAxisList', [])
             x_labels = s.get('xAxisYYList', [])
 
-            # 跳过 D-1 预测数据（legendCode 含 "1" 后缀或 legendName 含 "D-1"）
-            if 'D-1' in name or '预测' in name:
-                continue
-
-            series_by_code[code] = s
-
             # 取时间轴（第一个有效的 xAxisYYList）
             if time_labels is None and x_labels:
                 time_labels = x_labels
 
+            # D-1 预测数据存到 d1_series 作为兜底
+            is_d1 = ('D-1' in name or '预测' in name or code.endswith('1'))
+            if is_d1:
+                d1_series[code] = s
+                continue
+
+            series_by_code[code] = s
+
             # 打印每个序列信息
             if y_vals:
+                valid = sum(1 for v in y_vals if v is not None and v > 0)
                 print(f"    [{list_key.replace('EchartsDataList',''):20s}] {code:35s} | "
-                      f"{name:10s} | {len(y_vals):3d} pts | "
+                      f"{name:10s} | {len(y_vals):3d} pts | valid={valid} | "
                       f"range=[{min(y_vals):.1f}, {max(y_vals):.1f}]")
 
     if time_labels is None:
         raise RuntimeError("API 响应中没有找到时间轴 (xAxisYYList)")
 
-    print(f"  [API] 共收集 {len(series_by_code)} 个实时序列, {len(time_labels)} 个时间点")
+    print(f"  [API] 共收集 {len(series_by_code)} 个实时序列 + {len(d1_series)} 个D-1预测")
 
     # ── 构建记录：按时间索引对齐所有 series ──
     records = []
@@ -291,14 +295,24 @@ def _fetch_from_api(target_date: date) -> list[dict]:
 
         rec = {'datetime': dt.to_pydatetime()}
 
-        # 填充各字段（按 API_CODE_MAP 映射）
+        # 填充各字段（按 API_CODE_MAP 映射），实时为空时用 D-1 预测兜底
         for code, db_field in API_CODE_MAP.items():
+            val = None
             s = series_by_code.get(code)
             if s is not None and i < len(s.get('yAxisList', [])):
                 val = s['yAxisList'][i]
-                rec[db_field] = float(val) if val is not None else None
-            else:
-                rec[db_field] = None
+                if val is not None: val = float(val)
+
+            # D-1 预测兜底：实时为空或为 0 时，尝试 D-1（legendCode 后缀 1）
+            if (val is None or val == 0.0) and code in series_by_code:
+                d1_code = code[:-1] + '1' if code[-1] == '0' else code + '1'
+                d1_s = d1_series.get(d1_code)
+                if d1_s is not None and i < len(d1_s.get('yAxisList', [])):
+                    d1_val = d1_s['yAxisList'][i]
+                    if d1_val is not None and float(d1_val) > 0:
+                        val = float(d1_val)
+
+            rec[db_field] = val
 
         # 日期类型
         rec['day_type'] = _determine_day_type(dt)

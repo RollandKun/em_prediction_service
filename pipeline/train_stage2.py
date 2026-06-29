@@ -294,11 +294,11 @@ def train_one_season(X, y_abs, anchor, price_lag96,
     is_dry = (season_name == 'dry')
 
     if is_dry:
-        y_target = y_abs - anchor  # 残差
+        y_target = y_abs - anchor
         print(f"  枯水策略: RF预测残差 → price = anchor + resid")
     else:
-        y_target = y_abs            # 绝对值
-        print(f"  丰水策略: XGBoost 直接预测 price[t+96]")
+        y_target = y_abs - anchor  # residual too — avoids flat daily curve
+        print(f"  丰水策略: XGBoost预测残差 → price = anchor + resid")
 
     X_tv, y_tv = X[idx_tv], y_target[idx_tv]
 
@@ -404,13 +404,9 @@ def train_one_season(X, y_abs, anchor, price_lag96,
                         w[2] * segments['base']['oof_test'][i])
     oof_full[np.isnan(oof_full)] = 0.0
 
-    # 最终价格
-    if is_dry:
-        price_pred = anchor + oof_full   # 残差 + anchor = 价格
-        resid_pred = oof_full
-    else:
-        price_pred = oof_full             # 直接 = 价格
-        resid_pred = oof_full - anchor
+    # 最终价格：残差 + anchor（枯水和丰水统一策略）
+    price_pred = anchor + oof_full
+    resid_pred = oof_full
 
     # ── 评估 ──
     def evaluate(idx, label):

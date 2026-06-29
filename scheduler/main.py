@@ -250,10 +250,7 @@ def job_daily_inference() -> dict:
             blended = (w[:, 0] * seg_preds['valley'] +
                        w[:, 1] * seg_preds['peak'] +
                        w[:, 2] * seg_preds['base'])
-            if season == 'dry':
-                price_pred[idx] = anchor[idx] + blended
-            else:
-                price_pred[idx] = blended
+            price_pred[idx] = anchor[idx] + blended  # residual + anchor
 
         nan_price = np.isnan(price_pred).sum()
         if nan_price > 0:
@@ -371,10 +368,7 @@ def job_daily_inference() -> dict:
                     blended_l = (w_l[:, 0] * seg_preds_l['valley'] +
                                 w_l[:, 1] * seg_preds_l['peak'] +
                                 w_l[:, 2] * seg_preds_l['base'])
-                    if season == 'dry':
-                        price_pred_lag[idx] = anchor_l[idx] + blended_l
-                    else:
-                        price_pred_lag[idx] = blended_l
+                    price_pred_lag[idx] = anchor_l[idx] + blended_l  # residual + anchor
 
                 nan_price_l = np.isnan(price_pred_lag).sum()
                 if nan_price_l > 0:

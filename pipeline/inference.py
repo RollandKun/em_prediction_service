@@ -363,12 +363,9 @@ def run_inference(grid_lag=0):
                    w[:, 1] * seg_preds['peak'] +
                    w[:, 2] * seg_preds['base'])
 
-        if is_dry:
-            resid_pred[idx] = blended
-            price_pred[idx] = anchor[idx] + blended
-        else:
-            price_pred[idx] = blended
-            resid_pred[idx] = blended - anchor[idx]
+        # Both seasons use residual strategy: price = anchor + resid
+        resid_pred[idx] = blended
+        price_pred[idx] = anchor[idx] + blended
 
         # Per-season summary
         valid_p = ~np.isnan(price_pred[idx])

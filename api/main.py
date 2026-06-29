@@ -258,10 +258,7 @@ def _precompute_predictions(m1, m2, X_full, feat_names, period, price,
                    w[:, 1] * seg_preds['peak'] +
                    w[:, 2] * seg_preds['base'])
 
-        if season == 'dry':
-            price_pred[idx] = anchor[idx] + blended
-        else:
-            price_pred[idx] = blended
+        price_pred[idx] = anchor[idx] + blended  # residual + anchor (unified)
 
     # Cache by date
     nan_price = np.isnan(price_pred).sum()

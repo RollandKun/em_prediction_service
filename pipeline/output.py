@@ -41,6 +41,9 @@ _WET_VAL_START   = np.datetime64("2026-05-21")
 _WET_VAL_END     = np.datetime64("2026-05-28")
 _WET_TEST_START  = np.datetime64("2026-05-29")
 _WET_TEST_END    = np.datetime64("2026-06-06")
+# Expanded training to 6/27 was attempted but degraded wet-season Stage2
+# (-0.93 vs +0.26 R²). Late June has fundamentally different pricing dynamics
+# from early June. Will revisit when 7-8月 main flood season data accumulates.
 
 
 def _build_split_indices(dt_arr, mask, train_start, train_end,
