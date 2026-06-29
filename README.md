@@ -17,7 +17,7 @@ em_prediction_service/
 │   └── import_historical.py    #   一次性历史数据导入
 ├── pipeline/                   # ML 管线
 │   ├── data_loader.py          #   DB → numpy 数组（替代 Excel 读取）
-│   ├── feature_engine.py       #   特征工程（DB → 177 维, A-P 组, 集群平均）
+│   ├── feature_engine.py       #   特征工程（DB → 185 维, A-P 组, 集群平均）
 │   ├── output.py               #   保存 npz + 验证 vs 参考
 │   ├── train_stage1.py         #   Stage1 训练（4 变量 × 枯/丰 = 8 模型）
 │   ├── train_stage2.py         #   Stage2 训练（3 时段 × 枯/丰 = 6 模型）
@@ -191,6 +191,9 @@ docker compose up -d
 | `GET` | `/api/v1/predictions?date=YYYY-MM-DD` | 查询指定日期的 96 条预测 |
 | `GET` | `/api/v1/predictions/latest` | 查询最新日期的预测 |
 | `GET` | `/api/v1/models` | 活跃模型清单 |
+| `GET` | `/api/v1/chart?date=YYYY-MM-DD` | 预测曲线 PNG 图表 |
+| `GET` | `/api/v1/predictions/history?start=...&end=...` | 历史预测 vs 实际值对比 |
+| `GET` | `/api/v1/chart/history?start=...&end=...` | 历史对比 PNG 图表 |
 
 ### 响应示例
 
@@ -199,9 +202,9 @@ docker compose up -d
 {
   "status": "healthy",
   "db_connected": true,
-  "models_loaded": 14,
-  "feature_version": "v11",
-  "data_date_range": "2026-01-02 → 2026-06-06"
+  "models_loaded": 28,
+  "feature_version": "v14",
+  "data_date_range": "2026-01-02 → 2026-06-28"
 }
 ```
 
@@ -347,7 +350,7 @@ requests_cache             # SQLite 缓存（避免重复 API 调用）
 确认 PostgreSQL 中 `grid_data` 和 `weather_obs` 数据完整（grid 应 14,784 行，weather 应 ~4,128 行 hourly）。
 
 **Q: API 返回 503？**  
-检查 `pipeline/output/features_15min_dry.npz` 是否存在（需先运行 `feature_engine.py`），以及 `models/` 目录下是否有 14 个 `.pkl` 文件。
+检查 `pipeline/output/features_15min_dry.npz` 是否存在（需先运行 `feature_engine.py`），以及 `models/` 目录下是否有 28 个 `.pkl` 文件。
 
 **Q: 调度器训练失败？**  
 训练任务需要 ~4GB 内存。确认 docker-compose 中 scheduler 容器的 memory limit ≥ 4G。
@@ -367,9 +370,9 @@ EM_Pre3/                           # 实验分析项目（参考，不修改）
     └── Stage2/output/models/*.pkl         ← 初始模型权重（ERA5 数据）
 
 em_prediction_service/             # 生产服务（本项目）
-    ├── pipeline/feature_engine.py   ← 升级版：Open-Meteo ECMWF + 集群平均 + 177 维
+    ├── pipeline/feature_engine.py   ← 升级版：Open-Meteo ECMWF + 集群平均 + 185 维
     ├── pipeline/train_stage1.py     ← 移植版，适配新变量名（D_rad_avg_pp 等）
-    ├── pipeline/train_stage2.py     ← 移植版 (RF+XGB, v13)
+    ├── pipeline/train_stage2.py     ← 移植版 (RF+XGB 残差, v14)
     └── models/                      ← 自训练模型（需用新数据重训练）
 ```
 
@@ -397,7 +400,7 @@ em_prediction_service/             # 生产服务（本项目）
 | Stage1 Hydro | -0.6893 | -0.2498 | lag_96 residual |
 | Stage1 Wind | -0.3045 | -0.3272 | direct absolute |
 | Stage1 Load | 0.3530 | 0.7055 | lag_96 residual + SF |
-| Stage2 Price | 0.2289 (MAE=29.43) | 0.2574 (MAE=52.04) | dry RF残差 + wet XGB绝对值 |
+| Stage2 Price | 0.2289 (MAE=29.43) | 0.2574 (MAE=52.04) | dry RF残差 + wet XGB残差 |
 
 **Lag_192 (grid[t-192] → price[t+96])**:
 

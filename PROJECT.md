@@ -39,10 +39,10 @@ em_prediction_service/
 │
 ├── pipeline/                           # 核心推理 + 训练管线
 │   ├── data_loader.py                  ← DB → DataFrame + numpy 数组
-│   ├── feature_engine.py               ← 177 维特征构建（DB 适配版）
+│   ├── feature_engine.py               ← 185 维特征构建（DB 适配版）
 │   ├── inference.py                    ← 完整推理链（Stage1 + Stage2）
-│   ├── train_stage1.py                 ← Stage1 训练（8 个模型）
-│   ├── train_stage2.py                 ← Stage2 训练（6 个模型）
+│   ├── train_stage1.py                 ← Stage1 训练（8 Normal + 8 Lag_192 = 16 模型）
+│   ├── train_stage2.py                 ← Stage2 训练（6 Normal + 6 Lag_192 = 12 模型）
 │   ├── output.py                       ← 特征 npz 持久化
 │   └── output/                         # 生成物
 │       ├── features_15min_dry.npz      ← 枯水期特征矩阵
@@ -78,7 +78,7 @@ em_prediction_service/
 │   └── validator.py                    ← 数据质量校验
 │
 ├── scheduler/                          # 定时任务
-│   └── main.py                         ← APScheduler 调度器（9 个 Job）
+│   └── main.py                         ← APScheduler 调度器（8 个 Job）
 │
 └── db/                                 # 数据库
     └── schema.sql                      ← DDL（grid_data / weather_obs / weather_forecast / predictions / model_versions）
@@ -150,8 +150,8 @@ em_prediction_service/
 │         └─→ 基荷模型 (period 0-35, 88-95)                 │
 │                                                          │
 │  每时段 × 枯水/丰水 = 6 Normal + 6 Lag_192 = 12 模型      │
-│  枯水: RandomForest 预测 anchor残差 → price=anchor+resid  │
-│  丰水: XGBoost 直接预测 price[t+96] 绝对值                 │
+│  枯水: RandomForest 预测残差 → price = anchor + resid      │
+│  丰水: XGBoost 预测残差 → price = anchor + resid (v14)     │
 │  anchor = (lag96 + lag672) / 2                            │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -179,9 +179,9 @@ em_prediction_service/
 | 季节 | 模型 | Test MAE (元/MWh) | vs lag96 基线 |
 |------|------|-------------------|--------------|
 | 枯水 Normal | RF 残差 | 29.43 | ✅ -2.8 |
-| 丰水 Normal | XGB 绝对值 | 52.04 | ✅ -6.9 |
+| 丰水 Normal | XGB 残差 | 52.04 | ✅ -6.9 |
 | 枯水 Lag_192 | RF 残差 | 31.28 | ✅ -0.96 |
-| 丰水 Lag_192 | XGB 绝对值 | 55.50 | ✅ -3.42 |
+| 丰水 Lag_192 | XGB 残差 | 55.50 | ✅ -3.42 |
 
 ### 4.3 Lag_192 延迟容忍架构
 
@@ -224,7 +224,7 @@ Lag_192:    grid[t-192] → feature[t]     → price[t+96]  (forward_extend=192)
 
 ---
 
-## 5. 特征体系（177 维，A–P 组）
+## 5. 特征体系（185 维，A–P 组）
 
 | 组 | 内容 | 维度 | 安全滞后 |
 |----|------|------|----------|
@@ -256,8 +256,10 @@ Lag_192:    grid[t-192] → feature[t]     → price[t+96]  (forward_extend=192)
 | GET | `/health` | 健康检查 → DB 状态、模型数、数据范围 |
 | GET | `/api/v1/predictions?date=YYYY-MM-DD` | 获取指定日期 96 时段预测 |
 | GET | `/api/v1/predictions/latest` | 获取最新可用日期的预测 |
-| GET | `/api/v1/models` | 列出所有活跃模型（14 个） |
+| GET | `/api/v1/models` | 列出所有活跃模型（28 个） |
 | GET | `/api/v1/chart?date=YYYY-MM-DD` | 返回预测曲线的 PNG 图片 |
+| GET | `/api/v1/predictions/history?start=...&end=...` | 历史预测 vs 实际值（含前端页面） |
+| GET | `/api/v1/chart/history?start=...&end=...` | 历史对比 PNG 图表 |
 
 ### 响应示例
 
@@ -295,7 +297,7 @@ GET /api/v1/predictions?date=2026-06-25
 
 ---
 
-## 7. 调度器（9 个定时任务）
+## 7. 调度器（8 个定时任务）
 
 > 时区：Asia/Shanghai (CST = UTC+8)
 
@@ -307,7 +309,7 @@ GET /api/v1/predictions?date=2026-06-25
 | 02:00 | `daily_inference` | 特征工程 → Stage1 → Stage2 → 写入 predictions 表 |
 | 02:30 | `validate_data` | 校验昨日数据质量（完整性、值域） |
 | 12:00 | `refresh_token_and_fetch` | 中午备份：刷新 Token + 补拉电网数据 |
-| 每周日 03:00 | `weekly_retrain` | 全量重训练（14 个模型，~4GB 内存） |
+| 每周日 03:00 | `weekly_retrain` | 全量重训练（28 个模型，~4GB 内存） |
 | 每小时 | `hourly_health` | 心跳日志 |
 
 ### 调度器启动方式
@@ -333,7 +335,7 @@ python -m scheduler.main --list             # 列出所有任务
                ↓
 ┌─────────────────────────────────────────────────────────┐
 │  2. 特征工程 (feature_engine)                            │
-│     177 维构建 (A-P 组) → 时变安全筛选                    │
+│     185 维构建 (A-P 组) → 时变安全筛选                    │
 │     → features_15min_dry.npz + features_15min_wet.npz   │
 └──────────────┬──────────────────────────────────────────┘
                ↓
@@ -347,8 +349,8 @@ python -m scheduler.main --list             # 列出所有任务
 ┌─────────────────────────────────────────────────────────┐
 │  4. Stage2 推理 (inference.build_stage2_features)        │
 │     4 OOF + 70 安全特征 + 6 交互 = 80 维                  │
-│     枯水: RF 预测 anchor残差 → price = anchor + residual  │
-│     丰水: XGB 直接输出 price[t+96]                        │
+│     枯水: RF 预测残差 → price = anchor + residual          │
+│     丰水: XGBoost 预测残差 → price = anchor + residual     │
 │     三时段余弦软融合 → 96 个连续价格预测                    │
 └──────────────┬──────────────────────────────────────────┘
                ↓
@@ -391,7 +393,7 @@ scheduler::job_weekly_retrain()
   └── pipeline.train_stage2::train_and_save()
         ├── 加载 Stage1 OOF + 特征
         ├── 枯水：RandomForest 预测 anchor残差
-        ├── 丰水：XGBoost 直接预测价格
+        ├── 丰水：XGBoost 预测残差（v14 统一策略）
         ├── 保存 6 个 .pkl (含 safe_indices)
         └── 写入 model_versions 表
 ```
@@ -408,7 +410,7 @@ class Settings:
 
     # 模型
     model_dir: str = "models/"
-    feature_version: str = "v13"
+    feature_version: str = "v14"
 
     # 推理
     n_periods: int = 96
@@ -496,4 +498,4 @@ curl http://localhost:8000/api/v1/predictions/latest
 | v12 | 2026-06 | 生产训练: 策略简化（水电 lag_96、风电 direct）→ 适配新天气数据 |
 | v13 | 2026-06 | 生产推理: 枯水 RF 残差 + 丰水 XGB 绝对值 → Stage2 首次全面超越 lag96 基线 |
 | v13+ | 2026-06 | 日志全链路覆盖 + Bug 修复（枯水期定义、空 m2 崩溃防护、静默 NaN 告警） |
-| **v14 (Lag_192)** | 2026-06 | **延迟容忍架构**: 14 个 lag_192 模型（grid[t-192] → price[t+96]）+ forward_extend horizon 延伸 + API 双模型集自动切换 + 调度器 gap-fill pass |
+| **v14 (Lag_192 + Wet Residual)** | 2026-06 | **延迟容忍架构**: 14 个 lag_192 模型 + forward_extend horizon 延伸 + API 双模型集自动切换 + 调度器 gap-fill pass + **丰水 XGB 改残差策略**（避免日曲线全同过拟合） |

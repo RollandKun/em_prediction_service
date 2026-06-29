@@ -22,7 +22,7 @@ em_prediction_service/
 ├── .env                               ← Credentials (not committed)
 │
 ├── api/                               ← FastAPI REST layer
-│   ├── main.py                        ← App + lifespan + 4 endpoints
+│   ├── main.py                        ← App + lifespan + 8 endpoints
 │   └── schemas.py                     ← Pydantic response models
 │
 ├── ingestion/                         ← Data acquisition
@@ -34,7 +34,7 @@ em_prediction_service/
 │
 ├── pipeline/                          ← ML pipeline
 │   ├── data_loader.py                 ← DB → numpy arrays (PostgreSQL read)
-│   ├── feature_engine.py              ← 177-dim feature matrix (A-P groups)
+│   ├── feature_engine.py              ← 185-dim feature matrix (A-P groups)
 │   ├── output.py                      ← Save npz + verify vs reference
 │   ├── train_stage1.py                ← Stage1: 4 vars × 2 seasons = 8 models
 │   ├── train_stage2.py                ← Stage2: 3 periods × 2 seasons = 6 models
@@ -47,7 +47,7 @@ em_prediction_service/
 │   ├── __init__.py
 │   └── weather_config.py              ← Single truth: 19 nodes, 7 clusters, 6 vars
 │
-├── models/                            ← 14 .pkl model files
+├── models/                            ← 28 .pkl model files (14 Normal + 14 Lag_192)
 ├── db/init_db.sql                     ← PostgreSQL schema + partitioning
 ├── export_base_table.py               ← Export DB → v11_15min_base.xlsx
 └── doc/                               ← Design docs + reports
@@ -151,7 +151,7 @@ with valid features from grid[t-192] → predicts 2 extra days.
        +────────────── data_loader.py ──────────────+
                             |
                             v
-              feature_engine.py (177 dims, A-P)
+              feature_engine.py (185 dims, A-P)
                             |
                             v
        pipeline/output/features_15min_{dry,wet}.npz
@@ -173,7 +173,7 @@ with valid features from grid[t-192] → predicts 2 extra days.
         models/price_*.pkl
 ```
 
-### Feature Groups (177 dims, A–P)
+### Feature Groups (185 dims, A–P)
 
 | Group | Content | Dims |
 |---|---|---|
@@ -220,17 +220,18 @@ with valid features from grid[t-192] → predicts 2 extra days.
 | Wind | lag_96 residual | 33 wind-specific | -0.3045 | -0.3272 |
 | Load | lag_96 residual + SF | 37 load-specific | 0.3530 | 0.7055 |
 
-### Stage2 Strategy (v13) + Lag_192
+### Stage2 Strategy (v14) + Lag_192
 
 **Normal (grid[t] → price[t+96])**:
-- **Dry season**: RandomForest predicts `price[t+96] - anchor`, anchor = (lag96 + lag672)/2
-- **Wet season**: XGBoost predicts `price[t+96]` directly
+- **Both seasons**: predict `price[t+96] - anchor` (residual), anchor = (lag96 + lag672)/2
+- **Dry season**: RandomForest 预测残差 → price = anchor + resid
+- **Wet season**: XGBoost 预测残差 → price = anchor + resid (v14 改，避免日曲线全同过拟合)
 - 3-period soft blend: valley (午谷) / peak (晚峰) / base (基荷)
 - 89-dim input: 4 Stage1 OOF + 79 safe features + 6 interactions
 - **Dry R²=0.23 MAE=29.43 | Wet R²=0.26 MAE=52.04** ✅ 均击败 lag96 基线
 
 **Lag_192 (grid[t-192] → price[t+96])**:
-- Same architecture, trained on grid_lag=192 features
+- Same residual architecture, trained on grid_lag=192 features
 - **Dry R²=0.14 MAE=31.28 | Wet R²=0.18 MAE=55.50** ✅ 均击败 lag96 基线
 - Gap-fill 兜底: 精度下降 6-7%，但比无预测好
 
@@ -268,10 +269,10 @@ with valid features from grid[t-192] → predicts 2 extra days.
 - **Stage1 training**: `pipeline/train_stage1.py`
 - **Stage2 training**: `pipeline/train_stage2.py`
 - **Inference**: `pipeline/inference.py`
-- **API**: `api/main.py` (FastAPI, 4 endpoints)
+- **API**: `api/main.py` (FastAPI, 8 endpoints)
 - **Scheduler**: `scheduler/main.py` (APScheduler, 8 jobs)
 - **Base table export**: `export_base_table.py`
-- **Models (14 .pkl)**: `models/`
+- **Models (28 .pkl)**: `models/` (14 Normal + 14 Lag_192)
 - **Feature npz**: `pipeline/output/features_15min_{dry,wet}.npz`
 - **Reference project**: `G:\JAVA_Internship\EM_Pre3\`
 - **Reference V9**: `G:\JAVA_Internship\EM_Prediction2\v9\`
