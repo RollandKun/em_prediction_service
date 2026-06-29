@@ -17,6 +17,8 @@ COPY config.py database.py /app/
 COPY api/ /app/api/
 COPY pipeline/ /app/pipeline/
 COPY models/ /app/models/
+COPY shared/ /app/shared/
+COPY static/ /app/static/
 COPY ingestion/validator.py /app/ingestion/
 
 EXPOSE 8000

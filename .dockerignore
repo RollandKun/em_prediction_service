@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project docs (not needed at runtime)
+doc/
+docs/
+
+# Reference project
+../EM_Pre3/
+../EM_Prediction2/
+
+# Charts and reports (artifacts, not needed at runtime)
+pipeline/output/charts/
+pipeline/output/reports/
+
+# Environment (server has its own .env)
+.env
+.env.example
+
+# Docker
+.dockerignore
+docker-compose.yml
+
+# Logs
+*.log
+
+# Notebooks
+*.ipynb
+
+# Claude
+.claude/
+CLAUDE.md
+PROJECT.md
