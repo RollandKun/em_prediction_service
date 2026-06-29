@@ -297,6 +297,156 @@ def job_daily_inference() -> dict:
 
         engine.dispose()
 
+        # ── 6. Gap-fill pass: forward_extend=192 + grid_lag=192 ──
+        # Extend datetime 192 periods beyond grid data. New rows have NaN
+        # grid but real weather forecast. grid_lag=192 fills grid[t] with
+        # grid[t-192] which IS available → predicts 2 extra days.
+        logger.info("  [inference] Gap-fill pass (forward_extend=192, grid_lag=192)...")
+        t_lag = time.time()
+        try:
+            from pipeline.inference import _load_s1_for_lag, _load_s2_for_lag
+
+            m1_lag = _load_s1_for_lag(grid_lag=192)
+            m2_lag = _load_s2_for_lag(grid_lag=192)
+
+            if len(m1_lag) >= 4 and len(m2_lag) >= 3:
+                # Re-load with forward extension
+                (dt_arr_lag, df_lag, solar_lag, wind_lag, hydro_lag, load_lag,
+                 price_lag, bidspace_lag, reserve_lag, nonmarket_lag,
+                 tieline_lag, load_tie_lag) = load_for_inference(forward_extend=192)
+
+                result_lag = build_features(dt_arr_lag, df_lag,
+                                            solar_lag, wind_lag, hydro_lag, load_lag,
+                                            price_lag, bidspace_lag, reserve_lag,
+                                            nonmarket_lag, tieline_lag, load_tie_lag,
+                                            grid_lag=192)
+                save_outputs(result_lag, grid_lag=192)
+
+                X_lag = result_lag['X']
+                n_lag = X_lag.shape[0]  # may be larger than n due to forward_extend
+                fnames_lag = list(result_lag['feat_names'])
+                period_lag = result_lag['period']
+                price_lag = result_lag['price']
+                dry_lag = result_lag['dry_mask']
+                wet_lag = result_lag['wet_mask']
+
+                oof_s_lag = np.full(n_lag, np.nan); oof_h_lag = np.full(n_lag, np.nan)
+                oof_w_lag = np.full(n_lag, np.nan); oof_l_lag = np.full(n_lag, np.nan)
+
+                for season, mask in [('dry', dry_lag), ('wet', wet_lag)]:
+                    s, h, w, l_ = predict_stage1(m1_lag, X_lag, fnames_lag, season)
+                    oof_s_lag[mask] = s[mask]; oof_h_lag[mask] = h[mask]
+                    oof_w_lag[mask] = w[mask]; oof_l_lag[mask] = l_[mask]
+                for name, a in [('solar', oof_s_lag), ('hydro', oof_h_lag),
+                               ('wind', oof_w_lag), ('load', oof_l_lag)]:
+                    nan_count = np.isnan(a).sum()
+                    if nan_count > 0:
+                        logger.warning(f"  Stage1 lag {name}: {nan_count} NaN OOF → filled with 0")
+                    a[np.isnan(a)] = 0.0
+
+                first_m2_lag = next(iter(m2_lag.values()))
+                safe_idx_lag = first_m2_lag.get('safe_indices') if isinstance(first_m2_lag, dict) else None
+                X_s2_lag = build_stage2_features(X_lag, fnames_lag, oof_s_lag, oof_h_lag,
+                                                 oof_w_lag, oof_l_lag, period_lag,
+                                                 safe_indices=safe_idx_lag)
+
+                lag96_l = np.roll(price_lag, 96); lag96_l[:96] = np.nan
+                lag672_l = np.roll(price_lag, 672); lag672_l[:672] = np.nan
+                anchor_l = (lag96_l + lag672_l) / 2.0
+
+                price_pred_lag = np.full(n_lag, np.nan)
+                for season, mask in [('dry', dry_lag), ('wet', wet_lag)]:
+                    idx = np.where(mask)[0]
+                    if len(idx) == 0: continue
+                    seg_preds_l = {}
+                    for seg in ['valley', 'peak', 'base']:
+                        key = f"{seg}_{season}"
+                        if key in m2_lag:
+                            m_l = m2_lag[key]
+                            model_l = m_l['model'] if isinstance(m_l, dict) else m_l
+                            seg_preds_l[seg] = model_l.predict(X_s2_lag[idx])
+                        else:
+                            seg_preds_l[seg] = np.zeros(len(idx))
+                    w_l = blend_weights(period_lag[idx])
+                    blended_l = (w_l[:, 0] * seg_preds_l['valley'] +
+                                w_l[:, 1] * seg_preds_l['peak'] +
+                                w_l[:, 2] * seg_preds_l['base'])
+                    if season == 'dry':
+                        price_pred_lag[idx] = anchor_l[idx] + blended_l
+                    else:
+                        price_pred_lag[idx] = blended_l
+
+                nan_price_l = np.isnan(price_pred_lag).sum()
+                if nan_price_l > 0:
+                    price_pred_lag[np.isnan(price_pred_lag)] = 0.0
+                logger.info(f"  [inference] Lag192 价格预测: mean={np.mean(price_pred_lag):.1f}")
+
+                # Write gap-fill predictions for ALL dates beyond normal coverage.
+                # forward_extend=192 adds 2 extra days of predictions.
+                if n_lag >= 96:
+                    # Normal covers up to dt_arr[-1] + 24h. Lag extends further.
+                    last_normal_date = (pd.Timestamp(dt_arr[-1]) +
+                                       pd.Timedelta(hours=24)).strftime('%Y-%m-%d')
+
+                    # Collect all dates in lag predictions beyond normal horizon
+                    engine2 = create_engine(url, echo=False)
+                    existing_dates = set()
+                    with engine2.connect() as conn:
+                        rows = conn.execute(
+                            text("SELECT DISTINCT target_time::date FROM predictions")
+                        ).fetchall()
+                        existing_dates = {str(r[0]) for r in rows}
+                    engine2.dispose()
+
+                    # Extract lag predictions as 96-period days
+                    lag_target_dates = {}
+                    for i in range(n_lag):
+                        ts = pd.Timestamp(dt_arr_lag[i])
+                        td = (ts + pd.Timedelta(hours=24)).strftime('%Y-%m-%d')
+                        if td not in lag_target_dates:
+                            lag_target_dates[td] = np.full(96, np.nan)
+                        p = int(period_lag[i])
+                        if 0 <= p < 96:
+                            lag_target_dates[td][p] = price_pred_lag[i]
+
+                    records_written = 0
+                    for td, preds in sorted(lag_target_dates.items()):
+                        if td in existing_dates or td <= last_normal_date:
+                            continue  # already covered by normal pass
+                        # Fill NaN periods
+                        preds[np.isnan(preds)] = 0.0
+                        records_lag = []
+                        for p in range(96):
+                            records_lag.append({
+                                'target_time': pd.Timestamp(f'{td} {p//4:02d}:{(p%4)*15:02d}:00'),
+                                'predicted_price': float(preds[p]),
+                                'model_version': settings.feature_version + '_lag192',
+                                'season': 'dry' if pd.Timestamp(td).month <= 4 else 'wet',
+                                'period': p,
+                            })
+                        engine3 = create_engine(url, echo=False)
+                        with engine3.connect() as conn:
+                            with conn.begin():
+                                conn.execute(
+                                    text("""INSERT INTO predictions
+                                        (target_time, predicted_price, model_version, season, period)
+                                        VALUES (:target_time, :predicted_price, :model_version, :season, :period)
+                                        ON CONFLICT (target_time) DO NOTHING"""),
+                                    records_lag,
+                                )
+                                conn.commit()
+                        engine3.dispose()
+                        records_written += len(records_lag)
+                        logger.info(f"  [inference] Lag192 gap-fill: {td} ({len(records_lag)} periods)")
+
+                    if records_written > 0:
+                        logger.info(f"  [inference] Lag192 total: {records_written} gap-fill predictions")
+                logger.info(f"  [inference] Gap-fill pass done ({time.time()-t_lag:.1f}s)")
+            else:
+                logger.warning(f"  [inference] Lag192 models insufficient (S1={len(m1_lag)}, S2={len(m2_lag)})")
+        except Exception as e:
+            logger.warning(f"  [inference] Gap-fill pass failed (non-fatal): {e}")
+
         elapsed = time.time() - start
         logger.info(f"JOB: daily_inference 完成 ({elapsed:.1f}s)")
         return {'ok': True, 'elapsed': round(elapsed, 1),

@@ -61,20 +61,28 @@ FEAT_WET = FEAT_DIR / "features_15min_wet.npz"
 # 1. 特征加载与 Stage2 输入构建
 # ====================================================================
 
-def load_all_data():
+def load_all_data(grid_lag=0):
     """加载特征 + Stage1 OOF → 构建 Stage2 80维输入。
 
     完全移植自 EM_Pre3/Stage2/train_price_stage2.py 的 load_all_data()。
+
+    Parameters
+    ----------
+    grid_lag : int — if > 0, load _lag{N} feature and OOF files.
     """
+    lag_suffix = f"_lag{grid_lag}" if grid_lag > 0 else ""
+    feat_dry_path = FEAT_DIR / f"features_15min_dry{lag_suffix}.npz"
+    feat_wet_path = FEAT_DIR / f"features_15min_wet{lag_suffix}.npz"
+
     print("=" * 60)
-    print("  Stage 2 — 混合策略 (枯水 RF 残差 + 丰水 XGB 绝对值)")
+    print(f"  Stage 2 — 混合策略 (枯水 RF 残差 + 丰水 XGB 绝对值){lag_suffix}")
     print("=" * 60)
 
-    if not FEAT_DRY.exists():
-        raise FileNotFoundError(f"特征文件不存在: {FEAT_DRY}。请先运行 pipeline/feature_engine.py")
+    if not feat_dry_path.exists():
+        raise FileNotFoundError(f"特征文件不存在: {feat_dry_path}。请先运行 pipeline/feature_engine.py --grid-lag {grid_lag}")
 
-    data_dry = np.load(FEAT_DRY, allow_pickle=True)
-    data_wet = np.load(FEAT_WET, allow_pickle=True)
+    data_dry = np.load(feat_dry_path, allow_pickle=True)
+    data_wet = np.load(feat_wet_path, allow_pickle=True)
     all_names = data_dry['feat_names'].tolist()
 
     # ── 安全特征筛选（与 EM_Pre3 完全一致） ──
@@ -108,10 +116,10 @@ def load_all_data():
     # ── 加载 Stage1 OOF ──
     # 如果本地 OOF 文件存在（刚跑完 train_stage1），优先使用
     # 否则回退到 EM_Pre3 的参考 OOF
-    oof_solar = _load_oof('solar')
-    oof_hydro = _load_oof('hydro')
-    oof_wind  = _load_oof('wind')
-    oof_load  = _load_oof('load')
+    oof_solar = _load_oof('solar', grid_lag)
+    oof_hydro = _load_oof('hydro', grid_lag)
+    oof_wind  = _load_oof('wind', grid_lag)
+    oof_load  = _load_oof('load', grid_lag)
     print(f"  Stage1 OOF loaded: solar={oof_solar.shape}, hydro={oof_hydro.shape}, "
           f"wind={oof_wind.shape}, load={oof_load.shape}")
 
@@ -182,19 +190,20 @@ def load_all_data():
     }
 
 
-def _load_oof(var_name: str) -> np.ndarray:
+def _load_oof(var_name: str, grid_lag: int = 0) -> np.ndarray:
     """加载 Stage1 OOF 预测。
 
-    优先使用 pipeline/output/{var}_oof.npz（Phase 5 本地训练产出），
+    优先使用 pipeline/output/{var}_oof{lag_suffix}.npz（Phase 5 本地训练产出），
     回退到 EM_Pre3 Stage1/prediction/output/{var}_oof.npz（参考 OOF）。
     """
+    lag_suffix = f"_lag{grid_lag}" if grid_lag > 0 else ""
     # 本地 OOF
-    local_path = OOF_DIR / f"{var_name}_oof.npz"
+    local_path = OOF_DIR / f"{var_name}_oof{lag_suffix}.npz"
     if local_path.exists():
         data = np.load(local_path, allow_pickle=True)
         key = f"oof_{var_name}"
         if key in data:
-            print(f"    {var_name}: from pipeline/output/{var_name}_oof.npz")
+            print(f"    {var_name}: from pipeline/output/{var_name}_oof{lag_suffix}.npz")
             return data[key]
 
     # 回退：EM_Pre3 参考 OOF
@@ -443,19 +452,22 @@ def train_one_season(X, y_abs, anchor, price_lag96,
 # 4. 主流程
 # ====================================================================
 
-def train_and_save(skip_versioning: bool = False):
+def train_and_save(skip_versioning: bool = False, grid_lag: int = 0):
     """完整 Stage2 训练 + 保存 + model versioning。
 
     Parameters
     ----------
     skip_versioning : bool
         True = 跳过 model_versions 表写入（测试时使用）
+    grid_lag : int
+        If > 0, use lagged feature/OOF files and save with _lag{N} suffix.
     """
+    lag_suffix = f"_lag{grid_lag}" if grid_lag > 0 else ""
     print("=" * 60)
-    print("  Stage 2 — 枯水 RF 残差 + 丰水 XGB 绝对值")
+    print(f"  Stage 2 — 枯水 RF 残差 + 丰水 XGB 绝对值{lag_suffix}")
     print("=" * 60)
 
-    d = load_all_data()
+    d = load_all_data(grid_lag=grid_lag)
 
     # ── 逐季训练 ──
     results = {}
@@ -477,8 +489,10 @@ def train_and_save(skip_versioning: bool = False):
     print("  保存结果")
     print(f"{'=' * 60}")
 
-    dmask = np.load(FEAT_DRY, allow_pickle=True)['dry_mask'].astype(bool)
-    wmask = np.load(FEAT_DRY, allow_pickle=True)['wet_mask'].astype(bool)
+    # Load masks from the same feature file used for training
+    _feat_dry_path = FEAT_DIR / f"features_15min_dry{lag_suffix}.npz"
+    dmask = np.load(_feat_dry_path, allow_pickle=True)['dry_mask'].astype(bool)
+    wmask = np.load(_feat_dry_path, allow_pickle=True)['wet_mask'].astype(bool)
     n_total = len(dmask)
 
     price_pred_all = np.full(n_total, np.nan)
@@ -489,12 +503,12 @@ def train_and_save(skip_versioning: bool = False):
     resid_pred_all[wmask] = results['wet']['resid_pred'][wmask]
 
     np.savez(
-        FEAT_DIR / 'price_oof.npz',
+        FEAT_DIR / f'price_oof{lag_suffix}.npz',
         oof_price=price_pred_all, resid_pred=resid_pred_all,
         price=d['price_t'], price_lag96=d['lag96'],
         dry_mask=dmask, wet_mask=wmask,
     )
-    print("  [OK] price_oof.npz")
+    print(f"  [OK] price_oof{lag_suffix}.npz")
 
     # ── 保存 6 个 Stage2 模型 ──
     models_saved = []
@@ -502,11 +516,12 @@ def train_and_save(skip_versioning: bool = False):
         for seg in ['valley', 'peak', 'base']:
             m = results[sn]['segments'][seg]['model']
             if m is not None:
-                path = MODEL_DIR / f'price_{seg}_{sn}.pkl'
+                path = MODEL_DIR / f'price_{seg}_{sn}{lag_suffix}.pkl'
                 with open(path, 'wb') as f:
                     pickle.dump({
                         'model': m,
                         'season': sn, 'segment': seg,
+                        'grid_lag': grid_lag,
                         'feat_names': d['feat_names'],
                         'safe_indices': d['safe_indices'],
                         'safe_names': d['safe_names'],
@@ -629,9 +644,11 @@ def main():
     )
     parser.add_argument('--no-versioning', action='store_true',
                         help='跳过 model_versions 表写入')
+    parser.add_argument('--grid-lag', type=int, default=0,
+                        help='Train with lagged features (192 = gap-fill for t-2)')
     args = parser.parse_args()
 
-    train_and_save(skip_versioning=args.no_versioning)
+    train_and_save(skip_versioning=args.no_versioning, grid_lag=args.grid_lag)
 
 
 if __name__ == "__main__":

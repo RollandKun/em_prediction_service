@@ -156,11 +156,19 @@ def load_from_db():
     return (df.index, df) + arrays
 
 
-def load_for_inference():
+def load_for_inference(forward_extend=0):
     """Load grid_data + weather_obs + weather_forecast (inference mode).
 
     Merges historical weather_obs with weather_forecast for the forward
     horizon, ensuring t+96 Perfect-Prog window is fully covered.
+
+    Parameters
+    ----------
+    forward_extend : int — number of 15-min periods to extend beyond the
+        last grid_data row. New rows have NaN grid values but real weather
+        forecast data. Use with grid_lag=192 to extend prediction horizon
+        beyond the latest grid data (gap-fill mode).
+
     Returns same structure as load_from_db().
     """
     url = settings.database_url_sync
@@ -201,6 +209,62 @@ def load_for_inference():
     n_weather_cols = len(all_weather.columns) - 1
     logger.info(f"  Merged: {len(df)} rows, {len(df.columns)} columns "
                 f"(grid + {n_weather_cols} weather)")
+
+    # 3.5 Forward-extend: add future rows with NaN grid + weather forecast
+    if forward_extend > 0:
+        last_dt = df.index[-1]
+        freq = pd.Timedelta(minutes=15)
+        future_dts = pd.date_range(
+            start=last_dt + freq, periods=forward_extend, freq=freq
+        )
+        # Weather: interpolate from all_weather (forecast)
+        future_weather = all_weather.set_index("datetime").reindex(future_dts)
+        # ffill at 15-min resolution
+        future_weather = future_weather.ffill(limit=3)
+
+        # Build future rows: NaN grid + real weather
+        future_rows = []
+        for i, dt in enumerate(future_dts):
+            row = {"datetime": dt}
+            # Grid columns: NaN (will be filled by grid_lag in feature engine)
+            for col in df_grid.columns:
+                if col != "datetime":
+                    row[col] = np.nan
+            # Weather columns
+            for wcol in weather_col_names:
+                row[wcol] = (
+                    future_weather.loc[dt, wcol]
+                    if wcol in future_weather.columns
+                    else np.nan
+                )
+            future_rows.append(row)
+
+        df_future = pd.DataFrame(future_rows)
+        # Add the grid Chinese column names expected by _extract_arrays
+        df_future["datetime"] = pd.to_datetime(df_future["datetime"])
+        df_future = df_future.rename(columns={
+            "price": "出清价格(元/MWh)", "load": "省内负荷(MW)",
+            "solar": "光伏(MW)", "wind": "风电(MW)", "hydro": "水电(MW)",
+            "renewable_total": "新能源总出力(MW)", "bidspace": "竞价空间(MW)",
+            "reserve": "系统备用(MW)", "nonmarket": "非市场机组(MW)",
+            "tieline": "联络线(MW)", "load_tie": "负荷联络线(MW)",
+            "day_type": "日期类型",
+        })
+        df_future = df_future.set_index("datetime")
+
+        # Merge: original + future
+        df = pd.concat([df, df_future], axis=0).sort_index()
+        # Re-apply season columns
+        month_arr = df.index.month.values
+        df["枯水期"] = ((month_arr >= 1) & (month_arr <= 4)).astype(int)
+        df["汛期"]   = ((month_arr >= 5) & (month_arr <= 6)).astype(int)
+        df["主汛期"] = (month_arr >= 7).astype(int)
+        # ffill weather for future rows
+        df[weather_col_names] = df[weather_col_names].ffill(limit=3)
+        df[weather_col_names] = df[weather_col_names].ffill()
+        logger.info(f"  Forward-extended by {forward_extend} periods: "
+                    f"total={len(df)} rows, "
+                    f"last_dt={df.index[-1]}")
 
     # 4. Extract
     arrays = _extract_arrays(df)

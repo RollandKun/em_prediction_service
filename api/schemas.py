@@ -46,3 +46,17 @@ class HealthResponse(BaseModel):
     models_loaded: int
     feature_version: str
     data_date_range: Optional[str] = None
+
+
+class HistoryDay(BaseModel):
+    """One day of actual vs predicted prices."""
+    date: str = Field(..., description="YYYY-MM-DD")
+    actual: list[Optional[float]] = Field(..., description="96 actual prices (null if unavailable)")
+    predicted: list[Optional[float]] = Field(..., description="96 predicted prices (null if unavailable)")
+
+
+class HistoryResponse(BaseModel):
+    """Multi-day history comparison."""
+    start: str
+    end: str
+    days: list[HistoryDay]

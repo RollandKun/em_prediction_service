@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EM Prediction — 电价预测查询</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Microsoft YaHei', 'PingFang SC', sans-serif; background: #f0f2f5; color: #333; }
+  .header { background: linear-gradient(135deg, #1a237e, #283593); color: #fff; padding: 18px 32px; }
+  .header h1 { font-size: 22px; }
+  .header span { font-size: 13px; opacity: 0.75; margin-left: 8px; }
+
+  .tabs { display: flex; background: #fff; border-bottom: 2px solid #e0e0e0; padding: 0 24px; }
+  .tab { padding: 12px 24px; cursor: pointer; font-size: 15px; border-bottom: 3px solid transparent;
+         transition: all 0.2s; color: #666; user-select: none; }
+  .tab:hover { color: #1a237e; }
+  .tab.active { color: #1a237e; border-bottom-color: #1a237e; font-weight: 600; }
+
+  .main { max-width: 1200px; margin: 0 auto; padding: 20px 24px; }
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  .controls { background: #fff; border-radius: 8px; padding: 20px; margin-bottom: 16px;
+              box-shadow: 0 1px 3px rgba(0,0,0,.08); display: flex; flex-wrap: wrap;
+              gap: 12px; align-items: flex-end; }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field label { font-size: 12px; color: #666; font-weight: 500; }
+  .field input { padding: 8px 12px; border: 1px solid #d0d0d0; border-radius: 6px; font-size: 14px;
+                 font-family: inherit; outline: none; transition: border .2s; }
+  .field input:focus { border-color: #1a237e; }
+
+  button { padding: 9px 20px; border: none; border-radius: 6px; font-size: 14px; cursor: pointer;
+           font-family: inherit; transition: all .15s; font-weight: 500; }
+  .btn-primary { background: #1a237e; color: #fff; }
+  .btn-primary:hover { background: #283593; }
+  .btn-outline { background: #fff; color: #1a237e; border: 1.5px solid #1a237e; }
+  .btn-outline:hover { background: #f5f5ff; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .result { background: #fff; border-radius: 8px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  .result h3 { font-size: 15px; margin-bottom: 10px; color: #1a237e; }
+  .chart-img { width: 100%; border-radius: 6px; border: 1px solid #eee; }
+  .summary-bar { display: flex; gap: 16px; flex-wrap: wrap; margin: 10px 0; }
+  .summary-item { background: #f5f7ff; border-radius: 6px; padding: 10px 16px; min-width: 80px; }
+  .summary-item .val { font-size: 22px; font-weight: 700; color: #1a237e; }
+  .summary-item .lbl { font-size: 11px; color: #888; }
+
+  .error { background: #fff0f0; border: 1px solid #fcc; padding: 12px; border-radius: 6px;
+           color: #c00; font-size: 13px; margin-top: 10px; }
+  .loading { color: #888; font-size: 13px; font-style: italic; }
+
+  .data-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; }
+  .data-table th { background: #f5f7ff; padding: 6px 8px; text-align: center; font-weight: 600;
+                   border: 1px solid #e0e0e0; }
+  .data-table td { padding: 4px 8px; text-align: center; border: 1px solid #eee; }
+  .data-table tr:hover td { background: #fafafa; }
+  .valley { color: #4CAF50; }
+  .peak { color: #F44336; }
+  .base { color: #2196F3; }
+
+  .toggle-table { font-size: 12px; cursor: pointer; color: #1a237e; margin-top: 8px; display: inline-block; }
+  .toggle-table:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>⚡ 四川电力现货电价预测 <span>EM Prediction Service</span></h1>
+</div>
+
+<div class="tabs">
+  <div class="tab active" data-panel="single">单日预测</div>
+  <div class="tab" data-panel="history">历史对比</div>
+</div>
+
+<div class="main">
+
+  <!-- ==================== 单日预测 ==================== -->
+  <div id="panel-single" class="panel active">
+    <div class="controls">
+      <div class="field">
+        <label>查询日期</label>
+        <input type="date" id="s-date" value="2026-06-28">
+      </div>
+      <button class="btn-primary" onclick="querySingle()">🔍 查询预测</button>
+      <button class="btn-primary" onclick="querySingleChart()">📈 查看图表</button>
+      <span id="s-info" style="font-size:12px;color:#888;align-self:center;"></span>
+    </div>
+    <div id="s-result"></div>
+  </div>
+
+  <!-- ==================== 历史对比 ==================== -->
+  <div id="panel-history" class="panel">
+    <div class="controls">
+      <div class="field">
+        <label>开始日期</label>
+        <input type="date" id="h-start" value="2026-06-25">
+      </div>
+      <div class="field">
+        <label>结束日期</label>
+        <input type="date" id="h-end" value="2026-06-28">
+      </div>
+      <button class="btn-primary" onclick="queryHistory()">📊 查询数据</button>
+      <button class="btn-primary" onclick="queryHistoryChart()">📈 查看图表</button>
+      <span id="h-info" style="font-size:12px;color:#888;align-self:center;"></span>
+    </div>
+    <div id="h-result"></div>
+  </div>
+
+</div>
+
+<script>
+const API = '';
+
+function fmt(n) { return n != null ? n.toFixed(1) : '—'; }
+
+function seg(p) {
+  if (p >= 36 && p <= 67) return 'valley';
+  if (p >= 68 && p <= 87) return 'peak';
+  return 'base';
+}
+function segCN(s) { return {valley:'午谷',peak:'晚峰',base:'基荷'}[s]||s; }
+
+function timeStr(p) {
+  const h = Math.floor(p/4), m = (p%4)*15;
+  return String(h).padStart(2,'0')+':'+String(m).padStart(2,'0');
+}
+
+// ── Tab switching ──
+document.querySelectorAll('.tab').forEach(t => {
+  t.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'));
+    t.classList.add('active');
+    document.getElementById('panel-'+t.dataset.panel).classList.add('active');
+  });
+});
+
+// ── Single date ──
+async function querySingle() {
+  const d = document.getElementById('s-date').value;
+  const info = document.getElementById('s-info');
+  const res = document.getElementById('s-result');
+  if (!d) return;
+  info.textContent = '查询中...';
+  res.innerHTML = '';
+  try {
+    const r = await fetch(API+'/api/v1/predictions?date='+d);
+    if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+    const data = await r.json();
+    info.textContent = `模型: ${data.model_version} | 生成: ${data.generated_at}`;
+
+    // Summary bar
+    const s = data.summary;
+    let html = `<h3>📋 ${data.date} 预测概览</h3>
+      <div class="summary-bar">
+        <div class="summary-item"><div class="val">${fmt(s.avg_price)}</div><div class="lbl">均价 元/MWh</div></div>
+        <div class="summary-item"><div class="val peak">${fmt(s.peak_price)}</div><div class="lbl">峰值 (${timeStr(s.peak_period)})</div></div>
+        <div class="summary-item"><div class="val valley">${fmt(s.valley_price)}</div><div class="lbl">谷值 (${timeStr(s.valley_period)})</div></div>
+      </div>`;
+
+    // Table (collapsible)
+    html += `<span class="toggle-table" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'':'none'">▶ 展开96点明细</span>`;
+    html += `<div style="display:none;max-height:400px;overflow:auto;"><table class="data-table">
+      <tr><th>Period</th><th>时间</th><th>时段</th><th>预测价</th></tr>`;
+    for (const p of data.predictions) {
+      html += `<tr><td>${p.period}</td><td>${p.time}</td><td class="${p.segment}">${segCN(p.segment)}</td><td>${fmt(p.price)}</td></tr>`;
+    }
+    html += `</table></div>`;
+    res.innerHTML = html;
+  } catch(e) {
+    info.textContent = '';
+    res.innerHTML = `<div class="error">❌ ${e.message}</div>`;
+  }
+}
+
+async function querySingleChart() {
+  const d = document.getElementById('s-date').value;
+  const res = document.getElementById('s-result');
+  if (!d) return;
+  res.innerHTML = '<span class="loading">加载图表...</span>';
+  const img = new Image();
+  img.className = 'chart-img';
+  img.src = API+'/api/v1/chart?date='+d;
+  img.onload = () => { res.innerHTML = `<h3>📈 ${d} 预测曲线</h3>`; res.appendChild(img); };
+  img.onerror = () => { res.innerHTML = `<div class="error">❌ 图表加载失败 (${d})</div>`; };
+}
+
+// ── History ──
+async function queryHistory() {
+  const s = document.getElementById('h-start').value;
+  const e = document.getElementById('h-end').value;
+  const info = document.getElementById('h-info');
+  const res = document.getElementById('h-result');
+  if (!s || !e) return;
+  info.textContent = '查询中...';
+  res.innerHTML = '';
+  try {
+    const r = await fetch(API+'/api/v1/predictions/history?start='+s+'&end='+e);
+    if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+    const data = await r.json();
+    info.textContent = `${data.days.length} 天`;
+
+    let html = `<h3>📊 ${s} → ${e} 实际 vs 预测</h3><div class="summary-bar">`;
+    for (const day of data.days) {
+      const a = day.actual.filter(x=>x!=null), p = day.predicted.filter(x=>x!=null);
+      const aAvg = a.length ? (a.reduce((x,y)=>x+y,0)/a.length).toFixed(1) : '—';
+      const pAvg = p.length ? (p.reduce((x,y)=>x+y,0)/p.length).toFixed(1) : '—';
+      html += `<div class="summary-item"><div class="lbl">${day.date}</div>
+        <div class="val" style="font-size:16px">实 ${aAvg}</div>
+        <div class="val" style="font-size:16px;color:#1565C0">预 ${pAvg}</div></div>`;
+    }
+    html += `</div>`;
+    res.innerHTML = html;
+  } catch(e) {
+    info.textContent = '';
+    res.innerHTML = `<div class="error">❌ ${e.message}</div>`;
+  }
+}
+
+async function queryHistoryChart() {
+  const s = document.getElementById('h-start').value;
+  const e = document.getElementById('h-end').value;
+  const res = document.getElementById('h-result');
+  if (!s || !e) return;
+  res.innerHTML = '<span class="loading">加载图表...</span>';
+  const img = new Image();
+  img.className = 'chart-img';
+  img.src = API+'/api/v1/chart/history?start='+s+'&end='+e;
+  img.onload = () => { res.innerHTML = `<h3>📈 ${s} → ${e} 对比曲线</h3>`; res.appendChild(img); };
+  img.onerror = () => { res.innerHTML = `<div class="error">❌ 图表加载失败</div>`; };
+}
+
+// Init
+querySingle();
+</script>
+
+</body>
+</html>

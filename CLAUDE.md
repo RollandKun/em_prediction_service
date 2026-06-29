@@ -65,9 +65,16 @@ python -m ingestion.weather_fetcher --date 2026-06-15                   # Single
 python -m pipeline.feature_engine
 # → pipeline/output/features_15min_dry.npz + features_15min_wet.npz
 
+# Lag_192 gap-fill features (extends prediction horizon by 2 days)
+python -m pipeline.feature_engine --grid-lag 192 --forward-extend 192
+# → pipeline/output/features_15min_{dry,wet}_lag192.npz
+
 # Training (requires feature npz files)
-python -m pipeline.train_stage1    # 8 XGBoost models → models/stage1_*.pkl
-python -m pipeline.train_stage2    # 6 price models → models/price_*.pkl
+python -m pipeline.train_stage1           # 8 XGBoost models → models/stage1_*.pkl
+python -m pipeline.train_stage2           # 6 price models → models/price_*.pkl
+python -m pipeline.train_stage1 --grid-lag 192  # 8 lag_192 Stage1
+python -m pipeline.train_stage2 --grid-lag 192  # 6 lag_192 Stage2
+# Total: 28 models (14 Normal + 14 Lag_192)
 
 # Export base table (requires PostgreSQL)
 python export_base_table.py
@@ -92,15 +99,43 @@ No linting, formatting, or test framework is configured.
 
 ## Architecture
 
-### Two-Stage Prediction Pipeline
+### Two-Stage Prediction Pipeline (28 models: 14 Normal + 14 Lag_192)
 
 ```
-Stage 1: weather(t+96) + time(t+96) + persistence + D-1 morning + D-2 curve + O/P groups
-         → solar/wind/hydro/load[t+96]  (4 OOF predictions, 8 XGBoost models)
+Normal  — Stage 1: weather(t+96) + time(t+96) + grid[t] + L/N/O/P groups
+                    → solar/wind/hydro/load[t+96]  (8 XGBoost models)
+          Stage 2: 80-dim features (4 OOF + 70 safe + 6 interaction)
+                    → price[t+96]  (3-period models + soft blend, 6 models)
 
-Stage 2: 80-dim features (4 OOF + 70 safe + 6 interaction)
-         → price[t+96]  (3-period models + soft blend, 6 models)
+Lag_192 — Same pipeline, but grid[t] replaced by grid[t-192] (2-day lag).
+          Trained on shifted features. At inference, combined with
+          forward_extend=192 to extend prediction horizon by 2 days.
+          Used as gap-fill when grid data is delayed (t-2 constraint).
 ```
+
+### Lag_192 Gap-Fill Architecture (Phase 9)
+
+**Problem**: Grid data delayed 1-2 days. On 6/30 morning, latest grid = 6/28.
+Normal model needs grid[t] for t=6/29 to predict 7/1 → impossible.
+
+**Solution**: Train Lag_192 models that use grid[t-192] instead of grid[t].
+At inference, `forward_extend=192` generates extra datetime rows beyond grid
+data (NaN grid + real weather forecast). The lag_192 models fill these rows
+with valid features from grid[t-192] → predicts 2 extra days.
+
+```
+6/30 morning, grid to 6/28:
+├─ Normal:  grid[6/28] → feature[6/28] → predict price[6/29]  ✓
+└─ Lag_192: grid[6/26] → feature[6/29] (extended) → price[6/30]  ✓
+            grid[6/27] → feature[6/30] (extended) → price[7/1]   ✓
+```
+
+**Key files**:
+- `pipeline/feature_engine.py`: `build_features(..., grid_lag=192)` shifts grid arrays
+- `pipeline/data_loader.py`: `load_for_inference(forward_extend=192)` extends datetime
+- `pipeline/inference.py`: `_load_s1_for_lag(192)`, `_load_s2_for_lag(192)` load lag models
+- `api/main.py`: dual precompute (normal first, lag_192 fills gaps)
+- `scheduler/main.py`: `job_daily_inference` runs both passes
 
 ### Data Flow
 
@@ -185,12 +220,19 @@ Stage 2: 80-dim features (4 OOF + 70 safe + 6 interaction)
 | Wind | lag_96 residual | 33 wind-specific | -0.3045 | -0.3272 |
 | Load | lag_96 residual + SF | 37 load-specific | 0.3530 | 0.7055 |
 
-### Stage2 Strategy (v13)
+### Stage2 Strategy (v13) + Lag_192
 
+**Normal (grid[t] → price[t+96])**:
 - **Dry season**: RandomForest predicts `price[t+96] - anchor`, anchor = (lag96 + lag672)/2
 - **Wet season**: XGBoost predicts `price[t+96]` directly
 - 3-period soft blend: valley (午谷) / peak (晚峰) / base (基荷)
-- 80-dim input: 4 Stage1 OOF + 70 safe features + 6 interactions
+- 89-dim input: 4 Stage1 OOF + 79 safe features + 6 interactions
+- **Dry R²=0.23 MAE=29.43 | Wet R²=0.26 MAE=52.04** ✅ 均击败 lag96 基线
+
+**Lag_192 (grid[t-192] → price[t+96])**:
+- Same architecture, trained on grid_lag=192 features
+- **Dry R²=0.14 MAE=31.28 | Wet R²=0.18 MAE=55.50** ✅ 均击败 lag96 基线
+- Gap-fill 兜底: 精度下降 6-7%，但比无预测好
 
 ### Key Design Decisions
 

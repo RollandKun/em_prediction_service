@@ -40,33 +40,35 @@ _STAGE2_OOF = FEAT_DIR / "price_oof.npz"
 # Model loading
 # ====================================================================
 
-def load_stage1_models():
-    """Load all 8 Stage1 models. Returns {var_season: model_info}."""
+def _load_s1_for_lag(grid_lag=0):
+    """Load Stage1 models for a specific grid_lag value."""
+    lag_suffix = f"_lag{grid_lag}" if grid_lag > 0 else ""
     models = {}
     for var in ['solar', 'hydro', 'wind', 'load']:
         for season in ['dry', 'wet']:
             key = f"{var}_{season}"
-            path = MODEL_DIR / f"stage1_{var}_{season}.pkl"
+            path = MODEL_DIR / f"stage1_{var}_{season}{lag_suffix}.pkl"
             if path.exists():
                 with open(path, 'rb') as f:
                     info = pickle.load(f)
                     models[key] = info
                     strategy = info.get('strategy', '?') if isinstance(info, dict) else 'raw'
                     n_feat = len(info.get('feat_indices', [])) if isinstance(info, dict) else '?'
-                    logger.debug(f"  S1 {key}: strategy={strategy}, "
+                    logger.debug(f"  S1 {key}{lag_suffix}: strategy={strategy}, "
                                 f"features={n_feat}, path={path.name}")
             else:
-                logger.warning(f"  S1 {key}: model file not found — {path}")
+                logger.warning(f"  S1 {key}{lag_suffix}: model file not found — {path}")
     return models
 
 
-def load_stage2_models():
-    """Load 6 Stage2 period models (valley/peak/base × dry/wet)."""
+def _load_s2_for_lag(grid_lag=0):
+    """Load Stage2 models for a specific grid_lag value."""
+    lag_suffix = f"_lag{grid_lag}" if grid_lag > 0 else ""
     models = {}
     for season in ['dry', 'wet']:
         for seg in ['valley', 'peak', 'base']:
             key = f"{seg}_{season}"
-            path = _STAGE2_MODEL_DIR / f"price_{seg}_{season}.pkl"
+            path = _STAGE2_MODEL_DIR / f"price_{seg}_{season}{lag_suffix}.pkl"
             if path.exists():
                 with open(path, 'rb') as f:
                     obj = pickle.load(f)
@@ -74,14 +76,53 @@ def load_stage2_models():
                     models[key] = obj
                     has_model = 'model' in obj
                     has_safe = 'safe_indices' in obj
-                    logger.debug(f"  S2 {key}: has_model={has_model}, "
+                    logger.debug(f"  S2 {key}{lag_suffix}: has_model={has_model}, "
                                 f"has_safe_indices={has_safe}, path={path.name}")
                 else:
                     models[key] = {'model': obj, 'feat_names': None, 'safe_indices': None}
-                    logger.debug(f"  S2 {key}: raw model (no metadata), path={path.name}")
+                    logger.debug(f"  S2 {key}{lag_suffix}: raw model (no metadata), path={path.name}")
             else:
-                logger.warning(f"  S2 {key}: model file not found — {path}")
+                logger.warning(f"  S2 {key}{lag_suffix}: model file not found — {path}")
     return models
+
+
+def load_stage1_models():
+    """Load all Stage1 models (normal + lag variants). Returns {var_season: model_info}."""
+    return _load_s1_for_lag(grid_lag=0)
+
+
+def load_stage2_models():
+    """Load 6 Stage2 period models (normal variant)."""
+    return _load_s2_for_lag(grid_lag=0)
+
+
+def load_all_model_sets():
+    """Load both normal and lag_192 model sets. Returns dict keyed by grid_lag."""
+    sets = {}
+    for gl in [0, 192]:
+        s1 = _load_s1_for_lag(grid_lag=gl)
+        s2 = _load_s2_for_lag(grid_lag=gl)
+        if len(s1) >= 4 and len(s2) >= 3:  # at least partial
+            sets[gl] = {'s1': s1, 's2': s2}
+            logger.info(f"  Model set grid_lag={gl}: S1={len(s1)}, S2={len(s2)}")
+        else:
+            logger.warning(f"  Model set grid_lag={gl}: insufficient models "
+                          f"(S1={len(s1)}, S2={len(s2)}) — skipping")
+    return sets
+
+
+def detect_grid_freshness(dt_arr):
+    """Determine grid_lag needed based on data recency.
+
+    Returns the smallest grid_lag for which we have models, or 0 if normal is viable.
+    dt_arr[-1] should be the last timestamp with valid grid data.
+    """
+    if dt_arr is None or len(dt_arr) == 0:
+        return 0
+    last_dt = pd.Timestamp(dt_arr[-1])
+    hours_behind = (pd.Timestamp.now() - last_dt).total_seconds() / 3600
+    logger.info(f"  Grid freshness: last_data={last_dt}, hours_behind={hours_behind:.1f}h")
+    return hours_behind
 
 
 # ====================================================================
@@ -225,15 +266,21 @@ def blend_weights(period):
 # Main prediction
 # ====================================================================
 
-def run_inference():
-    """Full inference chain. Returns dict with all predictions."""
+def run_inference(grid_lag=0):
+    """Full inference chain. Returns dict with all predictions.
+
+    Parameters
+    ----------
+    grid_lag : int — if > 0, load _lag{N} feature files (gap-fill mode).
+    """
     t_total = time.time()
+    lag_suffix = f"_lag{grid_lag}" if grid_lag > 0 else ""
     logger.info("=" * 50)
-    logger.info("Inference Pipeline (Stage1 + Stage2)")
+    logger.info(f"Inference Pipeline (Stage1 + Stage2){lag_suffix}")
 
     # 1. Load features
     t0 = time.time()
-    feat_path = FEAT_DIR / "features_15min_dry.npz"
+    feat_path = FEAT_DIR / f"features_15min_dry{lag_suffix}.npz"
     if not feat_path.exists():
         raise FileNotFoundError(f"Features not found: {feat_path}")
 
@@ -252,8 +299,8 @@ def run_inference():
 
     # 2. Load models
     t0 = time.time()
-    m1 = load_stage1_models()
-    m2 = load_stage2_models()
+    m1 = _load_s1_for_lag(grid_lag=grid_lag)
+    m2 = _load_s2_for_lag(grid_lag=grid_lag)
     logger.info(f"  Models: S1={len(m1)}, S2={len(m2)}  ({time.time()-t0:.1f}s)")
 
     # 3. Stage1

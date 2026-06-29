@@ -101,8 +101,9 @@ def safe_fillna(arr, val=0.0):
 # ====================================================================
 
 def build_features(dt_arr, df, solar, wind, hydro, load, price,
-                   bidspace, reserve, nonmarket, tieline, load_tie):
-    """Build complete 177-dim feature matrix (v3 cluster averaging).
+                   bidspace, reserve, nonmarket, tieline, load_tie,
+                   grid_lag=0):
+    """Build complete feature matrix (v3 cluster averaging).
 
     Parameters
     ----------
@@ -110,6 +111,9 @@ def build_features(dt_arr, df, solar, wind, hydro, load, price,
     df : pd.DataFrame — merged grid + weather, ffill'd to 15-min
     solar, wind, hydro, load, price : np.ndarray (n,)
     bidspace, reserve, nonmarket, tieline, load_tie : np.ndarray (n,)
+    grid_lag : int — lag in periods to shift grid-dependent arrays.
+              0 = use current grid (normal mode).
+              192 = use grid from 2 days ago (gap-fill mode for t-2 constraint).
 
     Returns
     -------
@@ -117,9 +121,30 @@ def build_features(dt_arr, df, solar, wind, hydro, load, price,
     """
     n = len(df)
 
+    lag_tag = f" (grid_lag={grid_lag})" if grid_lag > 0 else ""
     print("\n" + "=" * 60)
-    print("  Building features (177 dims, A-P groups, v3 cluster avg)")
+    print(f"  Building features (A-P groups, v3 cluster avg{lag_tag})")
     print("=" * 60)
+
+    # ── Preserve originals for target computation ──
+    solar_orig = solar.copy()
+    wind_orig = wind.copy()
+    hydro_orig = hydro.copy()
+    load_orig = load.copy()
+    price_orig = price.copy()
+
+    # ── Shift grid arrays for feature construction (gap-fill mode) ──
+    if grid_lag > 0:
+        def _lag(arr, k):
+            r = np.roll(arr, k); r[:k] = np.nan; return r
+        solar  = _lag(solar,  grid_lag)
+        wind   = _lag(wind,   grid_lag)
+        hydro  = _lag(hydro,  grid_lag)
+        load   = _lag(load,   grid_lag)
+        price  = _lag(price,  grid_lag)
+        bidspace = _lag(bidspace, grid_lag)
+        nonmarket = _lag(nonmarket, grid_lag)
+        print(f"  Grid arrays shifted by {grid_lag} periods (gap-fill mode)")
 
     # ── Time features ──
     period_arr = dt_arr.hour * 4 + dt_arr.minute // 15
@@ -645,12 +670,13 @@ def build_features(dt_arr, df, solar, wind, hydro, load, price,
     feat_names = [f'{g}_{n}' for g, n, _ in feature_list]
     X = np.column_stack([arr for _, _, arr in feature_list])
 
-    y_solar = sf(solar, H)
-    y_hydro = sf(hydro, H)
-    y_wind = sf(wind, H)
-    y_price_resid = sf(price, H) - price
-    y_price_raw = sf(price, H)
-    price_lag96 = np.roll(price, 96)
+    # Targets always use ORIGINAL (unshifted) arrays — we still predict real t+96 values
+    y_solar = sf(solar_orig, H)
+    y_hydro = sf(hydro_orig, H)
+    y_wind = sf(wind_orig, H)
+    y_price_resid = sf(price_orig, H) - price_orig
+    y_price_raw = sf(price_orig, H)
+    price_lag96 = np.roll(price_orig, 96)
 
     print(f"  总特征维度: {len(feat_names)}")
     for grp in ['A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P']:
@@ -687,7 +713,7 @@ def build_features(dt_arr, df, solar, wind, hydro, load, price,
         'y_price_resid': y_price_resid,
         'y_price_raw': y_price_raw,
         'price_lag96': price_lag96,
-        'price': price,
+        'price': price_orig,  # always original — used for anchor computation in Stage2
         'dt': dt_arr.values,
         'period': period_arr,
         'month': month_arr,
@@ -713,25 +739,41 @@ def main():
     parser = argparse.ArgumentParser(description="DB-backed feature engineering (v3)")
     parser.add_argument("--verify-only", action="store_true",
                         help="Only compare with existing npz (skip build)")
+    parser.add_argument("--grid-lag", type=int, default=0,
+                        help="Lag grid arrays by N periods (192 = gap-fill for t-2). "
+                             "0 = normal mode.")
+    parser.add_argument("--forward-extend", type=int, default=0,
+                        help="Extend datetime index by N periods beyond last grid row. "
+                             "Use with --grid-lag 192 to extend forecast horizon.")
     args = parser.parse_args()
 
     if args.verify_only:
         verify()
         return
 
+    lag_tag = f" [grid_lag={args.grid_lag}]" if args.grid_lag > 0 else ""
+    ext_tag = f" [forward_extend={args.forward_extend}]" if args.forward_extend > 0 else ""
     print("=" * 70)
-    print("  feature_engine.py - DB-backed feature engineering (v3)")
+    print(f"  feature_engine.py - DB-backed feature engineering{lag_tag}{ext_tag}")
     print("=" * 70)
 
-    (dt_arr, df, solar, wind, hydro, load, price,
-     bidspace, reserve, nonmarket, tieline, load_tie) = load_from_db()
+    if args.forward_extend > 0:
+        from pipeline.data_loader import load_for_inference
+        (dt_arr, df, solar, wind, hydro, load, price,
+         bidspace, reserve, nonmarket, tieline, load_tie) = load_for_inference(
+            forward_extend=args.forward_extend)
+    else:
+        (dt_arr, df, solar, wind, hydro, load, price,
+         bidspace, reserve, nonmarket, tieline, load_tie) = load_from_db()
 
     result = build_features(dt_arr, df, solar, wind, hydro, load, price,
-                            bidspace, reserve, nonmarket, tieline, load_tie)
+                            bidspace, reserve, nonmarket, tieline, load_tie,
+                            grid_lag=args.grid_lag)
 
-    fp_dry, fp_wet = save_outputs(result)
+    fp_dry, fp_wet = save_outputs(result, grid_lag=args.grid_lag)
 
-    verify()
+    if not args.grid_lag:
+        verify()
 
     print(f"\n{'=' * 70}")
     print(f"  Complete!")

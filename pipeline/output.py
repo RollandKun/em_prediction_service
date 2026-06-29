@@ -58,8 +58,14 @@ def _build_split_indices(dt_arr, mask, train_start, train_end,
     return idx_train, idx_val, idx_test
 
 
-def save_outputs(result):
-    """Save dry and wet season npz files to pipeline/output/."""
+def save_outputs(result, grid_lag=0):
+    """Save dry and wet season npz files to pipeline/output/.
+
+    Parameters
+    ----------
+    result : dict — from build_features()
+    grid_lag : int — if > 0, suffix appended to filename (e.g. _lag192)
+    """
     dt_arr = result['dt']
     y_price_resid = result['y_price_resid']
     mask_dry = result['dry_mask']
@@ -80,6 +86,9 @@ def save_outputs(result):
           f"Test={len(idx_dry_test)}")
     print(f"    丰水: Train={len(idx_wet_train)}, Val={len(idx_wet_val)}, "
           f"Test={len(idx_wet_test)}")
+
+    # Filename suffix for gap-fill variants
+    lag_suffix = f"_lag{grid_lag}" if grid_lag > 0 else ""
 
     def _save_one(suffix, idx_train, idx_val, idx_test):
         out = {
@@ -106,7 +115,7 @@ def save_outputs(result):
             'wind_feat_cols': result['wind_feat_cols'],
             'load_feat_cols': result['load_feat_cols'],
         }
-        fp = OUTPUT_DIR / f'features_15min_{suffix}.npz'
+        fp = OUTPUT_DIR / f'features_15min_{suffix}{lag_suffix}.npz'
         np.savez_compressed(fp, **out)
         print(f"  保存: {fp}")
         return fp

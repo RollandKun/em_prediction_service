@@ -39,7 +39,7 @@ em_prediction_service/
 
 ```
 电网数据 (15min) ──┐
-                   ├──→ 特征工程 (177 维, A–P 组, 两阶段天气融合) ──→ Stage1 (4 XGBoost)
+                   ├──→ 特征工程 (185 维, A–P 组, 两阶段天气融合) ──→ Stage1 (4 XGBoost)
 气象数据 (hourly) ─┘                                                    ├─ solar[t+96]
     ↑                                                                   ├─ hydro[t+96]
     Open-Meteo ECMWF (19 子节点 × 6 变量)                              ├─ wind[t+96]
@@ -50,6 +50,34 @@ em_prediction_service/
                                                                     price[t+96] × 96 periods
                                                                     (valley/peak/base soft blend)
 ```
+
+### Lag_192 延迟容忍架构 (Phase 9)
+
+电网数据延迟 1-2 天发布，导致 t 时刻拿不到 grid[t]。Lag_192 模型将特征中
+所有 `grid[t]` 替换为 `grid[t-192]`（2 天前数据），配合 `forward_extend`
+将特征矩阵时间索引延伸 192 步，实现 horizon 延伸：
+
+```
+Normal 管道:   grid[t]     + weather[t], weather_forecast[t+96]  → price[t+96]
+Lag_192 管道:  grid[t-192] + weather[t], weather_forecast[t+96]  → price[t+96]
+               (forward_extend=192 延伸特征矩阵到未来 2 天)
+```
+
+**推理路径自动选择**:
+
+```
+API 启动 / Scheduler 每日推理:
+├─ Normal 模型: grid[t] 可用 → 预测 grid_latest + 1 天
+└─ Lag_192 模型: forward_extend=192 → 预测 grid_latest + 2~3 天 (gap-fill)
+```
+
+**时间链示例**（6/30 凌晨，电网到 6/28）:
+
+| 管道 | 输入 grid | 预测 target |
+|---|---|---|
+| Normal | grid[6/28] → feature[6/28] | price[6/29] |
+| Lag_192 | grid[6/26] → feature[6/29] (extended) | price[6/30] |
+| Lag_192 | grid[6/27] → feature[6/30] (extended) | price[7/1] |
 
 ## 快速开始
 
@@ -97,23 +125,36 @@ python -m ingestion.weather_fetcher --backfill 2026-01-02 2026-06-25
 ### 4. 构建特征
 
 ```bash
+# Normal 特征
 python -m pipeline.feature_engine
 # → pipeline/output/features_15min_dry.npz
 # → pipeline/output/features_15min_wet.npz
+
+# Lag_192 特征 (含 forward_extend 延伸 horizon)
+python -m pipeline.feature_engine --grid-lag 192 --forward-extend 192
+# → pipeline/output/features_15min_{dry,wet}_lag192.npz
 ```
 
 ### 5. 训练模型
 
 ```bash
-# Stage1（4 变量 × 枯/丰 = 8 模型）
+# Stage1 Normal（4 变量 × 枯/丰 = 8 模型）
 python -m pipeline.train_stage1
 # → models/stage1_{solar,hydro,wind,load}_{dry,wet}.pkl (8 files)
-# → pipeline/output/{solar,hydro,wind,load}_oof.npz (4 files)
 
-# Stage2（3 时段 × 枯/丰 = 6 模型）
-python -m pipeline.train_stage2
+# Stage1 Lag_192（同上，用 --grid-lag 192）
+python -m pipeline.train_stage1 --grid-lag 192
+# → models/stage1_{solar,hydro,wind,load}_{dry,wet}_lag192.pkl (8 files)
+
+# Stage2 Normal（3 时段 × 枯/丰 = 6 模型）
+python -m pipeline.train_stage2 --no-versioning
 # → models/price_{valley,peak,base}_{dry,wet}.pkl (6 files)
-# → pipeline/output/price_oof.npz
+
+# Stage2 Lag_192
+python -m pipeline.train_stage2 --grid-lag 192 --no-versioning
+# → models/price_{valley,peak,base}_{dry,wet}_lag192.pkl (6 files)
+
+# 共 28 个模型 (14 Normal + 14 Lag_192)
 ```
 
 ### 6. 导出基础表
@@ -344,15 +385,26 @@ em_prediction_service/             # 生产服务（本项目）
 | 6 | 联调 + 文档 | ✅ |
 | 7 | 天气数据升级 v3（19 子节点集群平均 + 特征解耦） | ✅ |
 | 8 | 代码结构解耦（shared/ + data_loader + output 模块化） | ✅ |
+| 9 | **Lag_192 延迟容忍架构 (gap-fill)** | ✅ |
 
-### 模型指标（v13, 旧 ERA5 数据）
+### 模型指标（Open-Meteo ECMWF 数据, 28 模型 = 14 Normal + 14 Lag_192）
+
+**Normal (grid[t] → price[t+96])**:
 
 | 模型 | 枯水 Test R² | 丰水 Test R² | 策略 |
 |---|---|---|---|
 | Stage1 Solar | 0.9632 | 0.9475 | direct absolute |
-| Stage1 Hydro | -0.6893 | -0.2498 | lag_672 residual + bias |
-| Stage1 Wind | -0.3045 | -0.3272 | lag_96 residual |
+| Stage1 Hydro | -0.6893 | -0.2498 | lag_96 residual |
+| Stage1 Wind | -0.3045 | -0.3272 | direct absolute |
 | Stage1 Load | 0.3530 | 0.7055 | lag_96 residual + SF |
 | Stage2 Price | 0.2289 (MAE=29.43) | 0.2574 (MAE=52.04) | dry RF残差 + wet XGB绝对值 |
 
-> ⚠️ 以上指标基于旧 ERA5 数据。使用 Open-Meteo ECMWF 新数据（100m风速/湿度等）重训练后指标预期会变化。
+**Lag_192 (grid[t-192] → price[t+96])**:
+
+| 模型 | 枯水 Test R² | 丰水 Test R² | vs lag96基线 |
+|---|---|---|---|
+| Stage1 Solar | 0.9450 | 0.9560 | — |
+| Stage1 Hydro | -0.7302 | -1.3011 | — |
+| Stage1 Wind | 0.1929 | -0.3200 | — |
+| Stage1 Load | 0.3014 | 0.7107 | — |
+| Stage2 Price | 0.1449 (MAE=31.28) | 0.1771 (MAE=55.50) | ✅ 均击败 lag96 |

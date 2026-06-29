@@ -25,7 +25,8 @@ import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -52,12 +53,15 @@ from pipeline.inference import (
 from api.schemas import (
     PredictionPoint, PredictionSummary, PredictionsResponse,
     ModelInfo, ModelsResponse, HealthResponse,
+    HistoryDay, HistoryResponse,
 )
 
 # ── Global state (populated at startup) ──
 state = {
     "models_s1": {},
     "models_s2": {},
+    "models_s1_lag": {},       # lag_192 gap-fill models
+    "models_s2_lag": {},
     "predictions_cache": {},    # date_str → list[96 prices]
     "feat_names": None,
     "X_full": None,
@@ -143,23 +147,53 @@ async def lifespan(app: FastAPI):
         missing_s2 = set(f"{seg}_{s}" for seg in ['valley','peak','base'] for s in ['dry','wet']) - set(s2_keys)
         logger.error(f"  Missing Stage2 models: {sorted(missing_s2)}")
 
-    # ── Pre-compute ──
+    # ── Pre-compute (normal models) ──
     if state["X_full"] is not None and n_s1 >= 8 and n_s2 >= 6:
         t4 = time.time()
-        logger.info("  Pre-computing all predictions...")
-        _precompute_predictions()
+        logger.info("  Pre-computing predictions (normal)...")
+        _precompute_predictions(state["models_s1"], state["models_s2"],
+                                state["X_full"], state["feat_names"],
+                                state["period"], state["price"],
+                                state["dry_mask"], state["wet_mask"],
+                                state["dt_arr"])
         n_dates = len(state["predictions_cache"])
-        # Quick sanity: check first/last date and price range
         dates_sorted = sorted(state["predictions_cache"].keys())
         first_date, last_date = dates_sorted[0], dates_sorted[-1]
         all_prices = np.concatenate([state["predictions_cache"][d] for d in dates_sorted])
-        logger.info(f"  Cache: {n_dates} dates ({first_date} → {last_date})  "
+        logger.info(f"  Cache (normal): {n_dates} dates ({first_date} → {last_date})  "
                     f"price range=[{all_prices.min():.1f}, {all_prices.max():.1f}]  "
                     f"({time.time()-t4:.1f}s)")
     else:
-        logger.warning(f"  Skipping pre-computation: "
+        logger.warning(f"  Skipping normal pre-computation: "
                        f"features={'OK' if state['X_full'] is not None else 'MISSING'}, "
                        f"S1={n_s1}/8, S2={n_s2}/6")
+
+    # ── Gap-fill precompute (lag_192 models) ──
+    t5 = time.time()
+    lag_feat_path = PROJECT_ROOT / "pipeline" / "output" / "features_15min_dry_lag192.npz"
+    if lag_feat_path.exists():
+        lag_data = np.load(lag_feat_path, allow_pickle=True)
+        from pipeline.inference import _load_s1_for_lag, _load_s2_for_lag
+        state["models_s1_lag"] = _load_s1_for_lag(grid_lag=192)
+        state["models_s2_lag"] = _load_s2_for_lag(grid_lag=192)
+        n_s1l, n_s2l = len(state["models_s1_lag"]), len(state["models_s2_lag"])
+
+        if n_s1l >= 4 and n_s2l >= 3:
+            logger.info(f"  Gap-fill precompute (lag_192): S1={n_s1l}, S2={n_s2l}")
+            n_before = len(state["predictions_cache"])
+            _precompute_predictions(state["models_s1_lag"], state["models_s2_lag"],
+                                    lag_data["X"], lag_data["feat_names"],
+                                    lag_data["period"], lag_data["price"],
+                                    lag_data["dry_mask"], lag_data["wet_mask"],
+                                    lag_data["dt"])
+            n_new = len(state["predictions_cache"]) - n_before
+            logger.info(f"  Gap-fill: +{n_new} new dates via lag_192  "
+                        f"({time.time()-t5:.1f}s)")
+        else:
+            logger.warning(f"  Skipping lag_192 precompute: insufficient models "
+                          f"(S1={n_s1l}, S2={n_s2l})")
+    else:
+        logger.info(f"  No lag_192 feature file — skipping gap-fill precompute")
 
     logger.info(f"Startup complete — {time.time()-t0:.1f}s total")
     logger.info("=" * 50)
@@ -171,17 +205,9 @@ async def lifespan(app: FastAPI):
     state.clear()
 
 
-def _precompute_predictions():
-    """Run full inference and cache by date."""
-    X_full = state["X_full"]
-    feat_names = state["feat_names"]
-    period = state["period"]
-    price = state["price"]
-    dry_mask = state["dry_mask"]
-    wet_mask = state["wet_mask"]
-    dt_arr = state["dt_arr"]
-    m1 = state["models_s1"]
-    m2 = state["models_s2"]
+def _precompute_predictions(m1, m2, X_full, feat_names, period, price,
+                           dry_mask, wet_mask, dt_arr):
+    """Run full inference and cache by date. Skips dates already in cache."""
     n = X_full.shape[0]
 
     # Stage1
@@ -307,7 +333,21 @@ async def log_requests(request: Request, call_next):
     return response
 
 
+# ── Static files ──
+static_dir = PROJECT_ROOT / "static"
+if static_dir.exists():
+    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+
 # ── Routes ──
+
+@app.get("/", response_class=HTMLResponse)
+async def index():
+    """Serve the frontend query UI."""
+    index_path = static_dir / "index.html"
+    if index_path.exists():
+        return HTMLResponse(index_path.read_text(encoding="utf-8"))
+    return HTMLResponse("<h2>Frontend not found. Place index.html in static/</h2>", status_code=404)
 
 @app.get("/health", response_model=HealthResponse)
 async def health():
@@ -456,6 +496,207 @@ async def prediction_chart(date_str: str = Query(None, alias="date")):
 
     buf = io.BytesIO()
     fig.savefig(buf, format='png', dpi=120, bbox_inches='tight')
+    plt.close(fig)
+    buf.seek(0)
+    return StreamingResponse(buf, media_type='image/png')
+
+
+# ── History: actual vs predicted ──
+
+@app.get("/api/v1/predictions/history", response_model=HistoryResponse)
+async def get_history(start: str = Query(..., alias="start", description="YYYY-MM-DD"),
+                      end: str = Query(..., alias="end", description="YYYY-MM-DD")):
+    """Return actual prices (from grid_data) and predicted prices (from predictions)
+    for a date range. Each day has two 96-point arrays — NaN where unavailable."""
+    try:
+        from sqlalchemy import create_engine, text
+    except ImportError:
+        raise HTTPException(500, "SQLAlchemy not available")
+
+    engine = create_engine(settings.database_url_sync, echo=False)
+
+    # Fetch actual prices (use %s for pandas read_sql with psycopg2)
+    actual_df = pd.read_sql(
+        "SELECT datetime, price FROM grid_data "
+        "WHERE datetime >= %(s)s AND datetime < %(e)s ORDER BY datetime",
+        engine,
+        params={"s": f"{start} 00:00:00", "e": f"{end} 23:59:59"},
+    )
+    actual_df["datetime"] = pd.to_datetime(actual_df["datetime"])
+
+    # Fetch predicted prices
+    pred_df = pd.read_sql(
+        "SELECT target_time, predicted_price FROM predictions "
+        "WHERE target_time >= %(s)s AND target_time < %(e)s ORDER BY target_time",
+        engine,
+        params={"s": f"{start} 00:00:00", "e": f"{end} 23:59:59"},
+    )
+    pred_df["target_time"] = pd.to_datetime(pred_df["target_time"])
+    engine.dispose()
+
+    # Build date-indexed dicts
+    date_range = pd.date_range(start, end, freq="D")
+    days = []
+    for d in date_range:
+        d_str = d.strftime("%Y-%m-%d")
+        actual_arr = np.full(96, np.nan)
+        predicted_arr = np.full(96, np.nan)
+
+        # Fill actual
+        mask_a = (actual_df["datetime"].dt.strftime("%Y-%m-%d") == d_str)
+        for _, row in actual_df[mask_a].iterrows():
+            p = row["datetime"].hour * 4 + row["datetime"].minute // 15
+            if 0 <= p < 96:
+                actual_arr[p] = float(row["price"])
+
+        # Fill predicted
+        mask_p = (pred_df["target_time"].dt.strftime("%Y-%m-%d") == d_str)
+        for _, row in pred_df[mask_p].iterrows():
+            p = row["target_time"].hour * 4 + row["target_time"].minute // 15
+            if 0 <= p < 96:
+                predicted_arr[p] = float(row["predicted_price"])
+
+        days.append(HistoryDay(
+            date=d_str,
+            actual=[round(float(x), 1) if not np.isnan(x) else None for x in actual_arr],
+            predicted=[round(float(x), 1) if not np.isnan(x) else None for x in predicted_arr],
+        ))
+
+    return HistoryResponse(start=start, end=end, days=days)
+
+
+@app.get("/api/v1/chart/history", responses={200: {"content": {"image/png": {}}}})
+async def history_chart(start: str = Query(..., alias="start"),
+                        end: str = Query(..., alias="end")):
+    """Return PNG chart overlay: actual (black) vs predicted (blue) for a date range."""
+    try:
+        from sqlalchemy import create_engine, text
+    except ImportError:
+        raise HTTPException(500, "SQLAlchemy not available")
+
+    engine = create_engine(settings.database_url_sync, echo=False)
+
+    actual_df = pd.read_sql(
+        "SELECT datetime, price FROM grid_data "
+        "WHERE datetime >= %(s)s AND datetime < %(e)s ORDER BY datetime",
+        engine,
+        params={"s": f"{start} 00:00:00", "e": f"{end} 23:59:59"},
+    )
+    actual_df["datetime"] = pd.to_datetime(actual_df["datetime"])
+
+    pred_df = pd.read_sql(
+        "SELECT target_time, predicted_price FROM predictions "
+        "WHERE target_time >= %(s)s AND target_time < %(e)s ORDER BY target_time",
+        engine,
+        params={"s": f"{start} 00:00:00", "e": f"{end} 23:59:59"},
+    )
+    pred_df["target_time"] = pd.to_datetime(pred_df["target_time"])
+    engine.dispose()
+
+    if len(actual_df) == 0 and len(pred_df) == 0:
+        raise HTTPException(404, f"No data found for {start} → {end}")
+
+    # ── Plot ──
+    plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'DejaVu Sans']
+    plt.rcParams['axes.unicode_minus'] = False
+
+    date_range = pd.date_range(start, end, freq="D")
+    n_days = len(date_range)
+
+    if n_days == 1:
+        # ── Single day: large chart with two curves ──
+        fig, ax = plt.subplots(figsize=(16, 6))
+        d = date_range[0]
+        d_str = d.strftime("%Y-%m-%d")
+        x = np.arange(96)
+
+        # Segment background
+        ax.axvspan(36, 67, color='#4CAF50', alpha=0.06, label='午谷')
+        ax.axvspan(68, 87, color='#F44336', alpha=0.06, label='晚峰')
+
+        # Actual
+        mask_a = actual_df["datetime"].dt.strftime("%Y-%m-%d") == d_str
+        a_arr = np.full(96, np.nan)
+        for _, row in actual_df[mask_a].iterrows():
+            p = row["datetime"].hour * 4 + row["datetime"].minute // 15
+            if 0 <= p < 96: a_arr[p] = float(row["price"])
+        ax.plot(x, a_arr, '#1a1a1a', lw=2.5, alpha=0.9, label='实际价格', zorder=5)
+
+        # Predicted
+        mask_p = pred_df["target_time"].dt.strftime("%Y-%m-%d") == d_str
+        p_arr = np.full(96, np.nan)
+        for _, row in pred_df[mask_p].iterrows():
+            p = row["target_time"].hour * 4 + row["target_time"].minute // 15
+            if 0 <= p < 96: p_arr[p] = float(row["predicted_price"])
+        ax.plot(x, p_arr, '#E65100', lw=2.0, alpha=0.85, label='预测价格', zorder=4)
+
+        ax.set_xlim(0, 95)
+        ax.set_xticks(range(0, 96, 4))
+        ax.set_xticklabels([f"{h:02d}:00" if m == 0 else "" for h in range(24) for m in (0, 15, 30, 45)][::4],
+                           rotation=0, fontsize=9)
+        # Hour labels at top
+        for h in range(24):
+            ax.text(h * 4, ax.get_ylim()[1] * 0.98 if ax.get_ylim()[1] > 0 else 0,
+                    f"{h:02d}:00", fontsize=7, ha='center', color='#888',
+                    transform=ax.get_xaxis_transform())
+        ax.set_ylabel('元/MWh', fontsize=13)
+        ax.set_title(f'{d_str} — 实际 vs 预测电价', fontsize=16, fontweight='bold')
+        ax.legend(fontsize=12, loc='upper right', framealpha=0.9)
+        ax.grid(axis='y', alpha=0.25)
+
+    else:
+        # ── Multi-day: continuous timeline, two overlaid curves ──
+        chart_w = max(20, n_days * 1.8)
+        fig, ax = plt.subplots(figsize=(chart_w, 7))
+
+        n_total = n_days * 96
+        x_all = np.arange(n_total)
+
+        a_all = np.full(n_total, np.nan)
+        p_all = np.full(n_total, np.nan)
+
+        for i, d in enumerate(date_range):
+            d_str = d.strftime("%Y-%m-%d")
+            base = i * 96
+            mask = actual_df["datetime"].dt.strftime("%Y-%m-%d") == d_str
+            for _, row in actual_df[mask].iterrows():
+                p = row["datetime"].hour * 4 + row["datetime"].minute // 15
+                a_all[base + p] = float(row["price"])
+            mask_p = pred_df["target_time"].dt.strftime("%Y-%m-%d") == d_str
+            for _, row in pred_df[mask_p].iterrows():
+                p = row["target_time"].hour * 4 + row["target_time"].minute // 15
+                p_all[base + p] = float(row["predicted_price"])
+
+        ax.plot(x_all, a_all, '#1a1a1a', lw=1.8, alpha=0.85, label='实际价格', zorder=5)
+        ax.plot(x_all, p_all, '#E65100', lw=1.6, alpha=0.75, label='预测价格', zorder=4)
+
+        # Day separator lines + date labels
+        for i in range(n_days):
+            ax.axvline(i * 96, color='#bbb', ls='-', alpha=0.5, lw=0.6)
+            if i < n_days:
+                ax.text(i * 96 + 48, ax.get_ylim()[0] if ax.get_ylim()[0] < 0 else 0,
+                        date_range[i].strftime("%m/%d"), fontsize=9, ha='center',
+                        color='#555', weight='bold',
+                        bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7))
+
+        # Tick every 4 hours
+        tick_pos = []
+        tick_lab = []
+        for i in range(n_days):
+            for h in [0, 4, 8, 12, 16, 20]:
+                p = i * 96 + h * 4
+                tick_pos.append(p)
+                tick_lab.append(f"{h:02d}:00" if i == 0 else "")
+        ax.set_xticks(tick_pos)
+        ax.set_xticklabels(tick_lab, fontsize=7)
+        ax.set_ylabel('元/MWh', fontsize=13)
+        ax.set_title(f'历史电价对比: {start} → {end}  (黑=实际, 橙=预测)', fontsize=16, fontweight='bold')
+        ax.legend(fontsize=13, loc='upper right', framealpha=0.9)
+        ax.grid(axis='y', alpha=0.2)
+
+    plt.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', dpi=150, bbox_inches='tight')
     plt.close(fig)
     buf.seek(0)
     return StreamingResponse(buf, media_type='image/png')

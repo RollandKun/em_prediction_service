@@ -298,14 +298,21 @@ def _generate_charts(chart_data, data_dry, data_wet):
     print(f"\n  Report: {report_path}")
 
 
-def train_and_save():
-    """Train all Stage1 models (dry+wet for each variable) and save to models/."""
+def train_and_save(grid_lag=0):
+    """Train all Stage1 models (dry+wet for each variable) and save to models/.
+
+    Parameters
+    ----------
+    grid_lag : int — if > 0, load features with _lag{N} suffix and save models
+               with _lag{N} prefix (gap-fill mode).
+    """
+    lag_suffix = f"_lag{grid_lag}" if grid_lag > 0 else ""
     print("=" * 70)
-    print("  Stage1 Model Training — v11 Mixed Anchors")
+    print(f"  Stage1 Model Training — v11 Mixed Anchors{lag_suffix}")
     print("=" * 70)
 
-    feat_dry_path = FEAT_DIR / "features_15min_dry.npz"
-    feat_wet_path = FEAT_DIR / "features_15min_wet.npz"
+    feat_dry_path = FEAT_DIR / f"features_15min_dry{lag_suffix}.npz"
+    feat_wet_path = FEAT_DIR / f"features_15min_wet{lag_suffix}.npz"
 
     if not feat_dry_path.exists():
         print("ERROR: Feature files not found. Run pipeline/feature_engine.py first.")
@@ -463,7 +470,7 @@ def train_and_save():
                 'strategy': strategy,
             }
 
-            model_path = MODEL_DIR / f"stage1_{var_name}_{season}.pkl"
+            model_path = MODEL_DIR / f"stage1_{var_name}_{season}{lag_suffix}.pkl"
             with open(model_path, 'wb') as f:
                 pickle.dump({
                     'model': model,
@@ -471,6 +478,7 @@ def train_and_save():
                     'season': season,
                     'strategy': strategy,
                     'horizon': 96,
+                    'grid_lag': grid_lag,
                     'feat_names': [n for n in feat_list if n in all_names],
                     'feat_indices': fidx,
                 }, f)
@@ -481,11 +489,11 @@ def train_and_save():
     print(f"\n{'─' * 60}")
     print(f"  Saving Stage1 OOF → pipeline/output/")
     for var_name in ['solar', 'hydro', 'wind', 'load']:
-        oof_path = FEAT_DIR / f"{var_name}_oof.npz"
+        oof_path = FEAT_DIR / f"{var_name}_oof{lag_suffix}.npz"
         # 格式与 EM_Pre3 Stage1/prediction/output/*_oof.npz 一致
         np.savez(oof_path, **{f"oof_{var_name}": oof_combined[var_name]})
         oof_n = np.sum(~np.isnan(oof_combined[var_name]))
-        print(f"    {var_name}_oof.npz: {oof_n:,}/{n_total:,} points ({oof_n/n_total*100:.1f}%)")
+        print(f"    {var_name}_oof{lag_suffix}.npz: {oof_n:,}/{n_total:,} points ({oof_n/n_total*100:.1f}%)")
 
     # ── Generate charts and report ──
     _generate_charts(chart_data, data_dry, data_wet)
@@ -496,4 +504,9 @@ def train_and_save():
 
 
 if __name__ == "__main__":
-    train_and_save()
+    import argparse
+    parser = argparse.ArgumentParser(description="Stage1 model training")
+    parser.add_argument("--grid-lag", type=int, default=0,
+                        help="Train with lagged grid features (192 = gap-fill for t-2)")
+    args = parser.parse_args()
+    train_and_save(grid_lag=args.grid_lag)
