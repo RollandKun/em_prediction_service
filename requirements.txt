@@ -1,27 +1,48 @@
-# Core
-numpy==1.26.4
-pandas==2.3.3
-scikit-learn==1.9.0
-xgboost==3.2.0
+# Core data science
+numpy>=1.26,<2
+pandas>=2.3
+scipy>=1.13
+scikit-learn>=1.9
+xgboost>=3.2
+joblib>=1.5
+threadpoolctl>=3.6
 
-# Web
-fastapi>=0.115.0
-uvicorn[standard]>=0.34.0
-pydantic>=2.5.0
-pydantic-settings>=2.0.0
+# Web framework
+fastapi>=0.138
+uvicorn>=0.49
+starlette>=0.46
+pydantic>=2.13
+pydantic-settings>=2.14
 
 # Database
-sqlalchemy>=2.0.30
-asyncpg>=0.30.0
-psycopg2-binary>=2.9.0
-alembic>=1.18.0
+sqlalchemy>=2.0
+asyncpg>=0.31
+psycopg2-binary>=2.9
+greenlet>=3.0
 
 # Scheduler
-apscheduler>=3.10.0
+APScheduler>=3.11
 
-# HTTP
-httpx>=0.28.0
+# Weather API
+openmeteo-requests>=1.7
+requests-cache>=1.3
+url-normalize>=3.0
+retry-requests>=2.0
+
+# HTTP client
+httpx>=0.28
+aiohttp>=3.12
+
+# File formats
+openpyxl>=3.1
+pyarrow>=24.0
+
+# Visualization
+matplotlib>=3.10
 
 # Utils
-python-dotenv>=1.0.0
-openpyxl>=3.1.0
+pyyaml>=6.0
+python-multipart>=0.0.20
+python-dateutil>=2.9
+pytz>=2024.2
+packaging>=24.0

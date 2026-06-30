@@ -8,9 +8,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev gcc && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Python deps with locked versions
-COPY requirements_lock.txt /app/
-RUN pip install --no-cache-dir -r requirements_lock.txt
+# Install Python deps
+COPY requirements.txt /app/
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY config.py database.py /app/

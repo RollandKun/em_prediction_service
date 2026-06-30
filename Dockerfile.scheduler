@@ -7,8 +7,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev gcc && \
     rm -rf /var/lib/apt/lists/*
 
-COPY requirements_lock.txt /app/
-RUN pip install --no-cache-dir -r requirements_lock.txt
+COPY requirements.txt /app/
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY config.py database.py /app/
 COPY pipeline/ /app/pipeline/
