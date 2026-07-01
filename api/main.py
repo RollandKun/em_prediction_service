@@ -360,66 +360,84 @@ async def health():
     return HealthResponse(
         status="healthy" if state["db_ok"] else "degraded",
         db_connected=state["db_ok"],
-        models_loaded=len(state["models_s1"]) + len(state["models_s2"]),
+        models_loaded=(len(state["models_s1"]) + len(state["models_s2"]) +
+                       len(state.get("models_s1_lag", {})) + len(state.get("models_s2_lag", {}))),
         feature_version=settings.feature_version,
         data_date_range=date_range,
     )
 
-
 @app.get("/api/v1/predictions", response_model=PredictionsResponse)
 async def get_predictions(date_str: str = Query(None, alias="date")):
-    """Get 96 price predictions for a specific date."""
-    cache = state["predictions_cache"]
-    if not cache:
-        logger.error("GET /predictions: cache is empty")
-        raise HTTPException(503, "Predictions not yet computed. Check model loading.")
+    """Get 96 price predictions for a specific date — from DB (unified source)."""
+    try:
+        from sqlalchemy import create_engine, text
+    except ImportError:
+        raise HTTPException(500, "SQLAlchemy not available")
 
+    engine = create_engine(settings.database_url_sync, echo=False)
+
+    # Find latest available date if not specified
     if date_str is None:
-        date_str = max(cache.keys())
+        with engine.connect() as conn:
+            r = conn.execute(text("SELECT MAX(target_time::date) FROM predictions")).scalar()
+            if r is None:
+                raise HTTPException(503, "No predictions available")
+            date_str = str(r)
 
-    if date_str not in cache:
-        available = sorted(cache.keys())
-        logger.warning(f"GET /predictions: date={date_str} not found, "
-                       f"available={available[0]}→{available[-1]}")
-        raise HTTPException(
-            404,
-            f"Date '{date_str}' not found. Available: {available[0]} → {available[-1]}"
-        )
-
-    prices = cache[date_str]
-    # Sanity: warn if all zeros (indicates upstream failure)
-    if np.all(prices == 0):
-        logger.warning(f"GET /predictions: date={date_str} all 96 periods are 0 — possible inference failure")
-
-    prices = cache[date_str]
-    preds = []
-    for p in range(96):
-        preds.append(PredictionPoint(
-            period=p,
-            time=_period_to_time(p),
-            price=round(float(prices[p]), 1),
-            segment=_period_to_segment(p),
-        ))
-
-    # Summary
-    peak_idx = int(np.argmax(prices))
-    valley_idx = int(np.argmin(prices))
-    summary = PredictionSummary(
-        avg_price=round(float(np.mean(prices)), 1),
-        peak_price=round(float(prices[peak_idx]), 1),
-        peak_period=peak_idx,
-        valley_price=round(float(prices[valley_idx]), 1),
-        valley_period=valley_idx,
+    # Query predictions for the date
+    import pandas as pd
+    pred_df = pd.read_sql(
+        "SELECT target_time, predicted_price FROM predictions "
+        "WHERE target_time::date = %(d)s ORDER BY target_time",
+        engine,
+        params={"d": date_str},
     )
+    engine.dispose()
 
+    if len(pred_df) == 0:
+        raise HTTPException(404, f"No predictions for {date_str}")
+
+    pred_df["target_time"] = pd.to_datetime(pred_df["target_time"])
+    preds = []
+    seen_periods = set()
+    for _, row in pred_df.iterrows():
+        p = row["target_time"].hour * 4 + row["target_time"].minute // 15
+        if 0 <= p < 96 and p not in seen_periods:
+            preds.append({
+                "period": p,
+                "time": _period_to_time(p),
+                "price": round(float(row["predicted_price"]), 1),
+                "segment": _period_to_segment(p),
+            })
+            seen_periods.add(p)
+
+    preds.sort(key=lambda x: x["period"])
+    prices = [p["price"] for p in preds]
     return PredictionsResponse(
         date=date_str,
         model_version=settings.feature_version,
-        generated_at=datetime.now().isoformat(),
+        generated_at=datetime.now(),
         predictions=preds,
-        summary=summary,
+        summary={
+            "avg_price": round(sum(prices)/len(prices), 1) if prices else 0,
+            "peak_price": max(prices) if prices else 0,
+            "peak_period": prices.index(max(prices)) if prices else 0,
+            "valley_price": min(prices) if prices else 0,
+    preds.sort(key=lambda x: x["period"])
+    prices = [p["price"] for p in preds]
+    return PredictionsResponse(
+        date=date_str,
+        model_version=settings.feature_version,
+        generated_at=datetime.now(),
+        predictions=preds,
+        summary={
+            "avg_price": round(sum(prices)/len(prices), 1) if prices else 0,
+            "peak_price": max(prices) if prices else 0,
+            "peak_period": prices.index(max(prices)) if prices else 0,
+            "valley_price": min(prices) if prices else 0,
+            "valley_period": prices.index(min(prices)) if prices else 0,
+        }
     )
-
 
 @app.get("/api/v1/predictions/latest", response_model=PredictionsResponse)
 async def get_latest_predictions():
@@ -468,10 +486,10 @@ async def prediction_chart(date_str: str = Query(None, alias="date")):
     seg_map[68:88] = 'peak'
 
     # ── Plot ──
-    plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'DejaVu Sans']
+    plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei', 'SimHei', 'DejaVu Sans']
     plt.rcParams['axes.unicode_minus'] = False
 
-    fig, ax = plt.subplots(figsize=(14, 5))
+    fig, ax = plt.subplots(figsize=(14, 6),dpi=100)
     seg_colors = {'valley': '#4CAF50', 'peak': '#F44336', 'base': '#2196F3'}
     seg_labels = {'valley': '午谷', 'peak': '晚峰', 'base': '基荷'}
 
@@ -594,7 +612,7 @@ async def history_chart(start: str = Query(..., alias="start"),
         raise HTTPException(404, f"No data found for {start} → {end}")
 
     # ── Plot ──
-    plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'DejaVu Sans']
+    plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei', 'SimHei', 'DejaVu Sans']
     plt.rcParams['axes.unicode_minus'] = False
 
     date_range = pd.date_range(start, end, freq="D")
@@ -602,7 +620,7 @@ async def history_chart(start: str = Query(..., alias="start"),
 
     if n_days == 1:
         # ── Single day: large chart with two curves ──
-        fig, ax = plt.subplots(figsize=(16, 6))
+        fig, ax = plt.subplots(figsize=(16, 6),dpi=100)
         d = date_range[0]
         d_str = d.strftime("%Y-%m-%d")
         x = np.arange(96)
@@ -644,7 +662,7 @@ async def history_chart(start: str = Query(..., alias="start"),
     else:
         # ── Multi-day: continuous timeline, two overlaid curves ──
         chart_w = max(20, n_days * 1.8)
-        fig, ax = plt.subplots(figsize=(chart_w, 7))
+        fig, ax = plt.subplots(figsize=(chart_w, 7),dpi=100)
 
         n_total = n_days * 96
         x_all = np.arange(n_total)

@@ -3,16 +3,17 @@ FROM python:3.12.4-slim
 
 WORKDIR /app
 
-# Install system deps
+RUN sed -i 's/deb.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list.d/debian.sources && \
+    apt-get update && apt-get install -y --no-install-recommends \
+    libpq-dev gcc fonts-wqy-microhei && \
+    rm -rf /var/lib/apt/lists/*
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpq-dev gcc && \
+     libpq-dev gcc fonts-wqy-microhei && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Python deps with locked versions
-COPY requirements_lock.txt /app/
-RUN pip install --no-cache-dir -r requirements_lock.txt
+COPY requirements.txt /app/
+RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
 
-# Copy application code
 COPY config.py database.py /app/
 COPY api/ /app/api/
 COPY pipeline/ /app/pipeline/
