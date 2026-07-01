@@ -360,7 +360,8 @@ async def health():
     return HealthResponse(
         status="healthy" if state["db_ok"] else "degraded",
         db_connected=state["db_ok"],
-        models_loaded=len(state["models_s1"]) + len(state["models_s2"]),
+        models_loaded=(len(state["models_s1"]) + len(state["models_s2"]) +
+                       len(state.get("models_s1_lag", {})) + len(state.get("models_s2_lag", {}))),
         feature_version=settings.feature_version,
         data_date_range=date_range,
     )
@@ -468,10 +469,10 @@ async def prediction_chart(date_str: str = Query(None, alias="date")):
     seg_map[68:88] = 'peak'
 
     # ── Plot ──
-    plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'DejaVu Sans']
+    plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei', 'Noto Sans CJK SC', 'DejaVu Sans']
     plt.rcParams['axes.unicode_minus'] = False
 
-    fig, ax = plt.subplots(figsize=(14, 5))
+    fig, ax = plt.subplots(figsize=(14, 6), dpi=100)
     seg_colors = {'valley': '#4CAF50', 'peak': '#F44336', 'base': '#2196F3'}
     seg_labels = {'valley': '午谷', 'peak': '晚峰', 'base': '基荷'}
 
@@ -594,7 +595,7 @@ async def history_chart(start: str = Query(..., alias="start"),
         raise HTTPException(404, f"No data found for {start} → {end}")
 
     # ── Plot ──
-    plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'DejaVu Sans']
+    plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei', 'Noto Sans CJK SC', 'DejaVu Sans']
     plt.rcParams['axes.unicode_minus'] = False
 
     date_range = pd.date_range(start, end, freq="D")
@@ -602,7 +603,7 @@ async def history_chart(start: str = Query(..., alias="start"),
 
     if n_days == 1:
         # ── Single day: large chart with two curves ──
-        fig, ax = plt.subplots(figsize=(16, 6))
+        fig, ax = plt.subplots(figsize=(16, 6), dpi=100)
         d = date_range[0]
         d_str = d.strftime("%Y-%m-%d")
         x = np.arange(96)
@@ -643,8 +644,8 @@ async def history_chart(start: str = Query(..., alias="start"),
 
     else:
         # ── Multi-day: continuous timeline, two overlaid curves ──
-        chart_w = max(20, n_days * 1.8)
-        fig, ax = plt.subplots(figsize=(chart_w, 7))
+        chart_w = max(20, min(n_days * 1.8, 40))
+        fig, ax = plt.subplots(figsize=(chart_w, 7), dpi=100)
 
         n_total = n_days * 96
         x_all = np.arange(n_total)

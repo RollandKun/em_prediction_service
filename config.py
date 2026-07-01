@@ -28,7 +28,7 @@ class Settings(BaseSettings):
 
     # Model
     model_dir: str = str(PROJECT_ROOT / "models")
-    feature_version: str = "v11"
+    feature_version: str = "v14"
 
     # Training
     dry_season_months: tuple = (1, 2, 3, 4)
