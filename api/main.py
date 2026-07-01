@@ -388,9 +388,9 @@ async def get_predictions(date_str: str = Query(None, alias="date")):
     import pandas as pd
     pred_df = pd.read_sql(
         "SELECT target_time, predicted_price FROM predictions "
-        "WHERE target_time::date = %(d)s ORDER BY target_time",
+        "WHERE target_time::date = %(d)s AND model_version = %(v)s ORDER BY target_time",
         engine,
-        params={"d": date_str},
+        params={"d": date_str, "v": settings.feature_version},
     )
     engine.dispose()
 
@@ -542,14 +542,13 @@ async def get_history(start: str = Query(..., alias="start", description="YYYY-M
     # Fetch predicted prices
     pred_df = pd.read_sql(
         "SELECT target_time, predicted_price FROM predictions "
-        "WHERE target_time >= %(s)s AND target_time < %(e)s ORDER BY target_time",
+        "WHERE target_time >= %(s)s AND target_time < %(e)s AND model_version = %(v)s ORDER BY target_time",
         engine,
-        params={"s": f"{start} 00:00:00", "e": f"{end} 23:59:59"},
+        params={"s": f"{start} 00:00:00", "e": f"{end} 23:59:59", "v": settings.feature_version},
     )
     pred_df["target_time"] = pd.to_datetime(pred_df["target_time"])
     engine.dispose()
 
-    # Build date-indexed dicts
     date_range = pd.date_range(start, end, freq="D")
     days = []
     for d in date_range:
@@ -601,9 +600,9 @@ async def history_chart(start: str = Query(..., alias="start"),
 
     pred_df = pd.read_sql(
         "SELECT target_time, predicted_price FROM predictions "
-        "WHERE target_time >= %(s)s AND target_time < %(e)s ORDER BY target_time",
+        "WHERE target_time >= %(s)s AND target_time < %(e)s AND model_version = %(v)s ORDER BY target_time",
         engine,
-        params={"s": f"{start} 00:00:00", "e": f"{end} 23:59:59"},
+        params={"s": f"{start} 00:00:00", "e": f"{end} 23:59:59", "v": settings.feature_version},
     )
     pred_df["target_time"] = pd.to_datetime(pred_df["target_time"])
     engine.dispose()

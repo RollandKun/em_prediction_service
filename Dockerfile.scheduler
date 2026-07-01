@@ -15,6 +15,7 @@ COPY config.py database.py /app/
 COPY pipeline/ /app/pipeline/
 COPY ingestion/ /app/ingestion/
 COPY scheduler/ /app/scheduler/
+COPY scripts/ /app/scripts/
 COPY shared/ /app/shared/
 COPY models/ /app/models/
 

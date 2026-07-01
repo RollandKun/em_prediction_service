@@ -26,7 +26,7 @@ lag    = build(*[run_inference(grid_lag=192)[k] for k in ['price_pred','dt','per
 engine = create_engine(settings.database_url_sync, echo=False)
 total = 0
 
-for label, preds in [('v13', normal), ('v13_lag192', lag)]:
+for label, preds in [('v14', normal), ('v14_lag192', lag)]:
     for d_str in sorted(preds):
         arr = preds[d_str]
         records = []
