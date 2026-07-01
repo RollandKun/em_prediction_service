@@ -416,7 +416,7 @@ async def get_predictions(date_str: str = Query(None, alias="date")):
     return PredictionsResponse(
         date=date_str,
         model_version=settings.feature_version,
-        generated_at=datetime.now(),
+        generated_at=datetime.now().isoformat(),
         predictions=preds,
         summary={
             "avg_price": round(sum(prices)/len(prices), 1) if prices else 0,
