@@ -423,18 +423,6 @@ async def get_predictions(date_str: str = Query(None, alias="date")):
             "peak_price": max(prices) if prices else 0,
             "peak_period": prices.index(max(prices)) if prices else 0,
             "valley_price": min(prices) if prices else 0,
-    preds.sort(key=lambda x: x["period"])
-    prices = [p["price"] for p in preds]
-    return PredictionsResponse(
-        date=date_str,
-        model_version=settings.feature_version,
-        generated_at=datetime.now(),
-        predictions=preds,
-        summary={
-            "avg_price": round(sum(prices)/len(prices), 1) if prices else 0,
-            "peak_price": max(prices) if prices else 0,
-            "peak_period": prices.index(max(prices)) if prices else 0,
-            "valley_price": min(prices) if prices else 0,
             "valley_period": prices.index(min(prices)) if prices else 0,
         }
     )
