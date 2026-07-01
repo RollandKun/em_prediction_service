@@ -44,6 +44,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from config import settings
+from apscheduler.triggers.cron import CronTrigger
 
 # ====================================================================
 # 日志配置
@@ -589,16 +590,16 @@ def register_all_jobs(scheduler) -> int:
     registered = 0
     for job_name, job_func in JOB_REGISTRY.items():
         schedule = JOB_SCHEDULES.get(job_name, {})
+        cron_expr = schedule.pop('cron', None)
         scheduler.add_job(
             job_func,
-            trigger='cron',
+            trigger=CronTrigger.from_crontab(cron_expr, **schedule),
             id=job_name,
             name=job_name,
             replace_existing=True,
-            **schedule,
         )
         registered += 1
-        logger.info(f"  注册: {job_name:20s} → {schedule.get('cron', 'N/A')}")
+        logger.info(f"  注册: {job_name:20s} → {cron_expr}")
     return registered
 
 

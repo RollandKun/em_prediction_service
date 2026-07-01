@@ -367,46 +367,72 @@ async def health():
     )
 
 
+def _fetch_predictions_from_db(date_str, engine=None):
+    """Read 96-period predictions from DB → unified source with history endpoint."""
+    close_engine = False
+    if engine is None:
+        from sqlalchemy import create_engine
+        engine = create_engine(settings.database_url_sync, echo=False)
+        close_engine = True
+
+    pred_df = pd.read_sql(
+        "SELECT target_time, predicted_price FROM predictions "
+        "WHERE target_time::date = %(d)s ORDER BY target_time",
+        engine,
+        params={"d": date_str},
+    )
+    if close_engine:
+        engine.dispose()
+
+    if len(pred_df) == 0:
+        return None
+
+    pred_df["target_time"] = pd.to_datetime(pred_df["target_time"])
+    prices = np.full(96, np.nan)
+    seen = set()
+    for _, row in pred_df.iterrows():
+        p = row["target_time"].hour * 4 + row["target_time"].minute // 15
+        if 0 <= p < 96 and p not in seen:
+            prices[p] = float(row["predicted_price"])
+            seen.add(p)
+
+    return prices
+
+
 @app.get("/api/v1/predictions", response_model=PredictionsResponse)
 async def get_predictions(date_str: str = Query(None, alias="date")):
-    """Get 96 price predictions for a specific date."""
-    cache = state["predictions_cache"]
-    if not cache:
-        logger.error("GET /predictions: cache is empty")
-        raise HTTPException(503, "Predictions not yet computed. Check model loading.")
-
+    """Get 96 price predictions for a specific date — from DB (unified source)."""
     if date_str is None:
-        date_str = max(cache.keys())
+        from sqlalchemy import create_engine, text
+        engine = create_engine(settings.database_url_sync, echo=False)
+        with engine.connect() as conn:
+            r = conn.execute(text("SELECT MAX(target_time::date) FROM predictions")).scalar()
+        engine.dispose()
+        if r is None:
+            raise HTTPException(503, "No predictions available")
+        date_str = str(r)
 
-    if date_str not in cache:
-        available = sorted(cache.keys())
-        logger.warning(f"GET /predictions: date={date_str} not found, "
-                       f"available={available[0]}→{available[-1]}")
-        raise HTTPException(
-            404,
-            f"Date '{date_str}' not found. Available: {available[0]} → {available[-1]}"
-        )
+    prices = _fetch_predictions_from_db(date_str)
+    if prices is None:
+        raise HTTPException(404, f"No predictions for {date_str}")
 
-    prices = cache[date_str]
-    # Sanity: warn if all zeros (indicates upstream failure)
-    if np.all(prices == 0):
-        logger.warning(f"GET /predictions: date={date_str} all 96 periods are 0 — possible inference failure")
+    if np.all(prices == 0) or np.isnan(prices).all():
+        logger.warning(f"GET /predictions: date={date_str} all zeros/NaN")
 
-    prices = cache[date_str]
     preds = []
     for p in range(96):
         preds.append(PredictionPoint(
             period=p,
             time=_period_to_time(p),
-            price=round(float(prices[p]), 1),
+            price=round(float(prices[p]) if not np.isnan(prices[p]) else 0.0, 1),
             segment=_period_to_segment(p),
         ))
 
-    # Summary
-    peak_idx = int(np.argmax(prices))
-    valley_idx = int(np.argmin(prices))
+    valid_prices = prices[~np.isnan(prices)]
+    peak_idx = int(np.nanargmax(prices)) if len(valid_prices) > 0 else 0
+    valley_idx = int(np.nanargmin(prices)) if len(valid_prices) > 0 else 0
     summary = PredictionSummary(
-        avg_price=round(float(np.mean(prices)), 1),
+        avg_price=round(float(np.nanmean(prices)), 1) if len(valid_prices) > 0 else 0,
         peak_price=round(float(prices[peak_idx]), 1),
         peak_period=peak_idx,
         valley_price=round(float(prices[valley_idx]), 1),
@@ -424,11 +450,15 @@ async def get_predictions(date_str: str = Query(None, alias="date")):
 
 @app.get("/api/v1/predictions/latest", response_model=PredictionsResponse)
 async def get_latest_predictions():
-    """Get predictions for the most recent available date."""
-    if not state["predictions_cache"]:
+    """Get predictions for the most recent available date — from DB."""
+    from sqlalchemy import create_engine, text
+    engine = create_engine(settings.database_url_sync, echo=False)
+    with engine.connect() as conn:
+        r = conn.execute(text("SELECT MAX(target_time::date) FROM predictions")).scalar()
+    engine.dispose()
+    if r is None:
         raise HTTPException(503, "No predictions available.")
-    latest = max(state["predictions_cache"].keys())
-    return await get_predictions(date_str=latest)
+    return await get_predictions(date_str=str(r))
 
 
 @app.get("/api/v1/models", response_model=ModelsResponse)
@@ -453,16 +483,10 @@ async def list_models():
 @app.get("/api/v1/chart", responses={200: {"content": {"image/png": {}}}})
 async def prediction_chart(date_str: str = Query(None, alias="date")):
     """Return PNG chart of 96-period price prediction curve."""
-    cache = state["predictions_cache"]
-    if not cache:
-        raise HTTPException(503, "Predictions not yet computed.")
-
-    if date_str is None:
-        date_str = max(cache.keys())
-    if date_str not in cache:
-        raise HTTPException(404, f"Date '{date_str}' not found.")
-
-    prices_arr = np.asarray(cache[date_str], dtype=float)
+    prices_arr = _fetch_predictions_from_db(date_str)
+    if prices_arr is None:
+        raise HTTPException(404, f"Date '{date_str}' not found in predictions.")
+    prices_arr = np.asarray(prices_arr, dtype=float)
     # Segment: period 0-35=base, 36-67=valley, 68-87=peak, 88-95=base
     seg_map = np.full(96, 'base', dtype=object)
     seg_map[36:68] = 'valley'
