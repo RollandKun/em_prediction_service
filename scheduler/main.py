@@ -398,16 +398,6 @@ def job_daily_inference() -> dict:
                     last_normal_date = (pd.Timestamp(dt_arr[-1]) +
                                        pd.Timedelta(hours=24)).strftime('%Y-%m-%d')
 
-                    # Collect all dates in lag predictions beyond normal horizon
-                    engine2 = create_engine(url, echo=False)
-                    existing_dates = set()
-                    with engine2.connect() as conn:
-                        rows = conn.execute(
-                            text("SELECT DISTINCT target_time::date FROM predictions")
-                        ).fetchall()
-                        existing_dates = {str(r[0]) for r in rows}
-                    engine2.dispose()
-
                     # Extract lag predictions as 96-period days
                     lag_target_dates = {}
                     for i in range(n_lag):
@@ -421,7 +411,7 @@ def job_daily_inference() -> dict:
 
                     records_written = 0
                     for td, preds in sorted(lag_target_dates.items()):
-                        if td in existing_dates or td <= last_normal_date:
+                        if td <= last_normal_date:
                             continue  # already covered by normal pass
                         # Fill NaN periods
                         preds[np.isnan(preds)] = 0.0

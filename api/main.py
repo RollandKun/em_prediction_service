@@ -403,7 +403,18 @@ async def get_predictions(date_str: str = Query(None, alias="date")):
     # Find latest available date if not specified
     if date_str is None:
         with engine.connect() as conn:
-            r = conn.execute(text("SELECT MAX(target_time::date) FROM predictions")).scalar()
+            r = conn.execute(
+                text("""
+                    SELECT MAX(d) FROM (
+                        SELECT target_time::date AS d
+                        FROM predictions
+                        WHERE model_version IN (:v, :vl)
+                        GROUP BY target_time::date
+                        HAVING COUNT(DISTINCT target_time) >= 96
+                    ) complete_days
+                """),
+                {"v": settings.feature_version, "vl": settings.feature_version + "_lag192"},
+            ).scalar()
             if r is None:
                 raise HTTPException(503, "No predictions available")
             date_str = str(r)
@@ -423,6 +434,11 @@ async def get_predictions(date_str: str = Query(None, alias="date")):
 
     if len(pred_df) == 0:
         raise HTTPException(404, f"No predictions for {date_str}")
+    if pred_df["target_time"].nunique() < 96:
+        raise HTTPException(
+            404,
+            f"Incomplete predictions for {date_str}: {pred_df['target_time'].nunique()}/96 periods",
+        )
 
     pred_df["target_time"] = pd.to_datetime(pred_df["target_time"])
     preds = []
@@ -490,7 +506,18 @@ async def prediction_chart(date_str: str = Query(None, alias="date")):
     engine = create_engine(settings.database_url_sync, echo=False)
     if date_str is None:
         with engine.connect() as conn:
-            r = conn.execute(text("SELECT MAX(target_time::date) FROM predictions")).scalar()
+            r = conn.execute(
+                text("""
+                    SELECT MAX(d) FROM (
+                        SELECT target_time::date AS d
+                        FROM predictions
+                        WHERE model_version IN (:v, :vl)
+                        GROUP BY target_time::date
+                        HAVING COUNT(DISTINCT target_time) >= 96
+                    ) complete_days
+                """),
+                {"v": settings.feature_version, "vl": settings.feature_version + "_lag192"},
+            ).scalar()
             if r is None:
                 engine.dispose()
                 raise HTTPException(503, "No predictions available")
@@ -509,6 +536,11 @@ async def prediction_chart(date_str: str = Query(None, alias="date")):
 
     if len(pred_df) == 0:
         raise HTTPException(404, f"Date '{date_str}' not found.")
+    if pred_df["target_time"].nunique() < 96:
+        raise HTTPException(
+            404,
+            f"Incomplete predictions for {date_str}: {pred_df['target_time'].nunique()}/96 periods",
+        )
 
     pred_df["target_time"] = pd.to_datetime(pred_df["target_time"])
     prices_arr = np.full(96, np.nan)
