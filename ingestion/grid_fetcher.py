@@ -21,7 +21,7 @@ import argparse
 import warnings
 from pathlib import Path
 from datetime import date, datetime, timedelta
-from typing import Optional
+from typing import Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -120,6 +120,17 @@ def _determine_day_type(dt: pd.Timestamp) -> str:
 # API 数据获取
 # ====================================================================
 
+def _coerce_target_date(target_date: Union[date, datetime, str]) -> date:
+    """Accept date-like inputs from scripts and normalize to date."""
+    if isinstance(target_date, datetime):
+        return target_date.date()
+    if isinstance(target_date, date):
+        return target_date
+    if isinstance(target_date, str):
+        return date.fromisoformat(target_date)
+    raise TypeError(f"target_date must be date, datetime, or YYYY-MM-DD str, got {type(target_date)!r}")
+
+
 def _fetch_from_api(target_date: date) -> list[dict]:
     """从电网数据平台 API 获取指定日期的电网实况数据。
 
@@ -172,6 +183,7 @@ def _fetch_from_api(target_date: date) -> list[dict]:
         from ingestion.auth_login import login
         return login()
 
+    target_date = _coerce_target_date(target_date)
     date_str = target_date.strftime('%Y-%m-%d')
     payload = {
         'timeOrderType': 96,
@@ -469,7 +481,7 @@ def _upsert_records(records: list[dict], dry_run: bool = False) -> int:
 # ====================================================================
 
 def fetch_grid_data(
-    target_date: Optional[date] = None,
+    target_date: Optional[Union[date, datetime, str]] = None,
     source: str = "api",
     source_path: Optional[str] = None,
     dry_run: bool = False,
@@ -493,6 +505,8 @@ def fetch_grid_data(
     """
     if target_date is None:
         target_date = date.today() - timedelta(days=1)
+    else:
+        target_date = _coerce_target_date(target_date)
 
     # ── 选择数据源 ──
     if source == "excel":
