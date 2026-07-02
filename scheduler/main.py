@@ -35,6 +35,7 @@ import argparse
 import warnings
 from pathlib import Path
 from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
 from apscheduler.triggers.cron import CronTrigger
 warnings.filterwarnings("ignore")
 if not isinstance(sys.stdout, io.TextIOWrapper):
@@ -54,6 +55,16 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S',
 )
 logger = logging.getLogger("scheduler")
+SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def _today_shanghai() -> date:
+    """Return the business date in Beijing time, regardless of container TZ."""
+    return datetime.now(SHANGHAI_TZ).date()
+
+
+def _yesterday_shanghai() -> date:
+    return _today_shanghai() - timedelta(days=1)
 
 
 # ====================================================================
@@ -91,7 +102,7 @@ def job_fetch_grid() -> dict:
     start = time.time()
     try:
         from ingestion.grid_fetcher import fetch_grid_data
-        yesterday = date.today() - timedelta(days=1)
+        yesterday = _yesterday_shanghai()
         n = fetch_grid_data(target_date=yesterday)
         elapsed = time.time() - start
         logger.info(f"JOB: fetch_grid 完成 — {n} 条 ({elapsed:.1f}s)")
@@ -139,7 +150,7 @@ def job_refresh_token_and_fetch() -> dict:
 
         # Step 2: 拉取数据
         from ingestion.grid_fetcher import fetch_grid_data
-        yesterday = date.today() - timedelta(days=1)
+        yesterday = _yesterday_shanghai()
         n = fetch_grid_data(target_date=yesterday)
         elapsed = time.time() - start
         logger.info(f"JOB: refresh_token_and_fetch 完成 — Token已刷新, 数据{n}条 ({elapsed:.1f}s)")
@@ -471,7 +482,7 @@ def job_validate_data() -> dict:
     start = time.time()
     try:
         from ingestion.validator import validate_date
-        yesterday = date.today() - timedelta(days=1)
+        yesterday = _yesterday_shanghai()
         result = validate_date(target_date=yesterday)
         elapsed = time.time() - start
         logger.info(f"JOB: validate_data 完成 — 等级={result['status'].upper()} ({elapsed:.1f}s)")
@@ -521,7 +532,7 @@ def job_hourly_health() -> dict:
     """每小时健康心跳：确认调度器进程存活。"""
     db_host = settings.database_url.split('@')[1].split('/')[0] if '@' in settings.database_url else '?'
     logger.info(f"HEARTBEAT: alive | db={db_host} | fv={settings.feature_version}")
-    return {'ok': True, 'timestamp': datetime.now().isoformat()}
+    return {'ok': True, 'timestamp': datetime.now(SHANGHAI_TZ).isoformat()}
 
 
 # ====================================================================
