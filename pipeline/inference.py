@@ -278,6 +278,26 @@ def season_masks_for_inference(dry_mask, wet_mask, dt_arr):
     return dry, wet
 
 
+def _price_lag(price, periods):
+    lagged = np.roll(price, periods)
+    lagged[:periods] = np.nan
+    return lagged
+
+
+def price_anchor_from_lags(price, lags=(96, 672)):
+    """Build the Stage2 price anchor from selected historical lag prices."""
+    lag_arrays = [_price_lag(price, p) for p in lags]
+    stacked = np.vstack(lag_arrays)
+    valid = np.isfinite(stacked)
+    count = valid.sum(axis=0)
+    total = np.where(valid, stacked, 0.0).sum(axis=0)
+    anchor = np.full(len(price), np.nan)
+    np.divide(total, count, out=anchor, where=count > 0)
+    lag96 = _price_lag(price, 96)
+    lag672 = _price_lag(price, 672)
+    return anchor, lag96, lag672
+
+
 # ====================================================================
 # Main prediction
 # ====================================================================
@@ -352,9 +372,8 @@ def run_inference(grid_lag=0):
                                   period, safe_indices=safe_idx)
     logger.info(f"  Stage2 input: {X_s2.shape[1]} dims  ({time.time()-t0:.1f}s)")
 
-    lag96 = np.roll(price, 96); lag96[:96] = np.nan
-    lag672 = np.roll(price, 672); lag672[:672] = np.nan
-    anchor = (lag96 + lag672) / 2.0
+    anchor_lags = (grid_lag, 672) if grid_lag > 0 else (96, 672)
+    anchor, lag96, lag672 = price_anchor_from_lags(price, lags=anchor_lags)
 
     price_pred = np.full(n, np.nan)
     resid_pred = np.full(n, np.nan)

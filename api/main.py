@@ -72,7 +72,7 @@ from config import settings
 from pipeline.inference import (
     load_stage1_models, load_stage2_models,
     predict_stage1, build_stage2_features, blend_weights,
-    season_masks_for_inference,
+    season_masks_for_inference, price_anchor_from_lags,
 )
 
 from api.schemas import (
@@ -210,7 +210,7 @@ async def lifespan(app: FastAPI):
                                     lag_data["X"], lag_data["feat_names"],
                                     lag_data["period"], lag_data["price"],
                                     lag_data["dry_mask"], lag_data["wet_mask"],
-                                    lag_data["dt"])
+                                    lag_data["dt"], anchor_lags=(192, 672))
             n_new = len(state["predictions_cache"]) - n_before
             logger.info(f"  Gap-fill: +{n_new} new dates via lag_192  "
                         f"({time.time()-t5:.1f}s)")
@@ -231,7 +231,7 @@ async def lifespan(app: FastAPI):
 
 
 def _precompute_predictions(m1, m2, X_full, feat_names, period, price,
-                           dry_mask, wet_mask, dt_arr):
+                           dry_mask, wet_mask, dt_arr, anchor_lags=(96, 672)):
     """Run full inference and cache by date. Skips dates already in cache."""
     n = X_full.shape[0]
     dry_mask, wet_mask = season_masks_for_inference(dry_mask, wet_mask, dt_arr)
@@ -259,9 +259,7 @@ def _precompute_predictions(m1, m2, X_full, feat_names, period, price,
     X_s2 = build_stage2_features(X_full, feat_names, oof_s, oof_h, oof_w, oof_l,
                                   period, safe_indices=safe_idx)
 
-    lag96 = np.roll(price, 96); lag96[:96] = np.nan
-    lag672 = np.roll(price, 672); lag672[:672] = np.nan
-    anchor = (lag96 + lag672) / 2.0
+    anchor, _, _ = price_anchor_from_lags(price, lags=anchor_lags)
 
     price_pred = np.full(n, np.nan)
 

@@ -211,7 +211,7 @@ def job_daily_inference() -> dict:
         from pipeline.inference import (
             load_stage1_models, load_stage2_models,
             predict_stage1, build_stage2_features, blend_weights,
-            season_masks_for_inference,
+            season_masks_for_inference, price_anchor_from_lags,
         )
 
         dry_mask, wet_mask = season_masks_for_inference(dry_mask, wet_mask, dt_arr)
@@ -243,9 +243,7 @@ def job_daily_inference() -> dict:
         X_s2 = build_stage2_features(X, fnames, oof_s, oof_h, oof_w, oof_l,
                                       period, safe_indices=safe_idx)
 
-        lag96 = np.roll(price, 96); lag96[:96] = np.nan
-        lag672 = np.roll(price, 672); lag672[:672] = np.nan
-        anchor = (lag96 + lag672) / 2.0
+        anchor, _, _ = price_anchor_from_lags(price)
 
         price_pred = np.full(n, np.nan)
         for season, mask in [('dry', dry_mask), ('wet', wet_mask)]:
@@ -367,9 +365,7 @@ def job_daily_inference() -> dict:
                                                  oof_w_lag, oof_l_lag, period_lag,
                                                  safe_indices=safe_idx_lag)
 
-                lag96_l = np.roll(price_lag, 96); lag96_l[:96] = np.nan
-                lag672_l = np.roll(price_lag, 672); lag672_l[:672] = np.nan
-                anchor_l = (lag96_l + lag672_l) / 2.0
+                anchor_l, _, _ = price_anchor_from_lags(price_lag, lags=(192, 672))
 
                 price_pred_lag = np.full(n_lag, np.nan)
                 for season, mask in [('dry', dry_lag), ('wet', wet_lag)]:
