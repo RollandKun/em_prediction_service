@@ -434,11 +434,6 @@ async def get_predictions(date_str: str = Query(None, alias="date")):
 
     if len(pred_df) == 0:
         raise HTTPException(404, f"No predictions for {date_str}")
-    if pred_df["target_time"].nunique() < 96:
-        raise HTTPException(
-            404,
-            f"Incomplete predictions for {date_str}: {pred_df['target_time'].nunique()}/96 periods",
-        )
 
     pred_df["target_time"] = pd.to_datetime(pred_df["target_time"])
     preds = []
@@ -536,11 +531,6 @@ async def prediction_chart(date_str: str = Query(None, alias="date")):
 
     if len(pred_df) == 0:
         raise HTTPException(404, f"Date '{date_str}' not found.")
-    if pred_df["target_time"].nunique() < 96:
-        raise HTTPException(
-            404,
-            f"Incomplete predictions for {date_str}: {pred_df['target_time'].nunique()}/96 periods",
-        )
 
     pred_df["target_time"] = pd.to_datetime(pred_df["target_time"])
     prices_arr = np.full(96, np.nan)
