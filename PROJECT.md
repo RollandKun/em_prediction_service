@@ -25,10 +25,10 @@
 ```
 em_prediction_service/
 ├── PROJECT.md                          ← 本文件
-├── README.md                           ← 项目说明（旧版，部分过时）
+├── README.md                           ← 项目说明
 ├── CLAUDE.md                           ← Claude Code 指导文件
 ├── config.py                           ← 全局配置（DB URL、模型路径、特征版本）
-├── docker-compose.yml                  ← Docker 编排
+├── docker-compose.yml                  ← Docker 编排（api + scheduler，连接外部 PostgreSQL）
 ├── Dockerfile.api                      ← API 容器
 ├── Dockerfile.scheduler                ← 调度器容器
 ├── requirements.txt                    ← Python 依赖
@@ -196,6 +196,10 @@ Normal:     grid[t]     → feature[t]     → price[t+96]
 Lag_192:    grid[t-192] → feature[t]     → price[t+96]  (forward_extend=192)
 ```
 
+Stage2 价格锚点同步使用延迟容忍逻辑：
+- Normal: `price[t-96]` 与 `price[t-672]` 取平均，缺一个则用另一个。
+- Lag_192: `price[t-192]` 与 `price[t-672]` 取平均，缺一个则用另一个。
+
 ### 4.4 模型文件格式
 
 每个 `.pkl` 文件是一个 Python dict：
@@ -308,7 +312,7 @@ GET /api/v1/predictions?date=2026-06-25
 | 01:30 | `fetch_weather` | 拉取 NWP 气象预报（4 天） |
 | 02:00 | `daily_inference` | 特征工程 → Stage1 → Stage2 → 写入 predictions 表 |
 | 02:30 | `validate_data` | 校验昨日数据质量（完整性、值域） |
-| 12:00 | `refresh_token_and_fetch` | 中午备份：刷新 Token + 补拉电网数据 |
+| 08:00 | `refresh_token_and_fetch` | 早上备份：刷新 Token + 补拉昨日电网数据，并重新推理覆盖预测 |
 | 每周日 03:00 | `weekly_retrain` | 全量重训练（28 个模型，~4GB 内存） |
 | 每小时 | `hourly_health` | 心跳日志 |
 
@@ -419,6 +423,8 @@ class Settings:
     wet_season_months: tuple = (5, 6)
 ```
 
+> 当前生产推理中，7/8/9 月没有独立季节模型时按 wet 模型兜底。
+
 ---
 
 ## 11. 已知限制与改进方向
@@ -464,8 +470,8 @@ docker compose logs -f api
 docker compose logs -f scheduler
 
 # 健康检查
-curl http://localhost:8000/health
-curl http://localhost:8000/api/v1/predictions/latest
+curl http://localhost:8100/health
+curl http://localhost:8100/api/v1/predictions/latest
 ```
 
 ---
@@ -499,3 +505,4 @@ curl http://localhost:8000/api/v1/predictions/latest
 | v13 | 2026-06 | 生产推理: 枯水 RF 残差 + 丰水 XGB 绝对值 → Stage2 首次全面超越 lag96 基线 |
 | v13+ | 2026-06 | 日志全链路覆盖 + Bug 修复（枯水期定义、空 m2 崩溃防护、静默 NaN 告警） |
 | **v14 (Lag_192 + Wet Residual)** | 2026-06 | **延迟容忍架构**: 14 个 lag_192 模型 + forward_extend horizon 延伸 + API 双模型集自动切换 + 调度器 gap-fill pass + **丰水 XGB 改残差策略**（避免日曲线全同过拟合） |
+| **v14 ops update** | 2026-07 | 08:00 补拉昨日电网数据后自动重跑推理并覆盖预测；Lag_192 Stage2 锚点改为 `price[t-192]` 与 `price[t-672]` 均值；7/8/9 月按 wet 模型兜底 |

@@ -28,7 +28,7 @@ em_prediction_service/
 │   └── main.py                 #   APScheduler（8 个 job）
 ├── config.py                   # 全局配置（Pydantic Settings）
 ├── database.py                 # SQLAlchemy ORM（7 表）
-├── docker-compose.yml          # 3 容器：db + api + scheduler
+├── docker-compose.yml          # api + scheduler（连接外部 PostgreSQL）
 ├── Dockerfile.api
 ├── Dockerfile.scheduler
 ├── requirements.txt
@@ -62,6 +62,10 @@ Normal 管道:   grid[t]     + weather[t], weather_forecast[t+96]  → price[t+9
 Lag_192 管道:  grid[t-192] + weather[t], weather_forecast[t+96]  → price[t+96]
                (forward_extend=192 延伸特征矩阵到未来 2 天)
 ```
+
+Stage2 价格锚点：
+- Normal：`price[t-96]` 与 `price[t-672]` 均值（缺一个则用另一个）
+- Lag_192：`price[t-192]` 与 `price[t-672]` 均值（缺一个则用另一个）
 
 **推理路径自动选择**:
 
@@ -170,18 +174,21 @@ python export_base_table.py
 uvicorn api.main:app --host 0.0.0.0 --port 8000
 ```
 
+> 生产推理中，7/8/9 月没有独立季节模型时按 wet 模型兜底。
+
 ### 8. Docker Compose 一键启动
 
 ```bash
 docker compose up -d
-# → db (PostgreSQL 15)
-# → api (FastAPI, port 8000)
+# → api (FastAPI, host port 8100 → container port 8000)
 # → scheduler (APScheduler)
 ```
 
 ## API 文档
 
-启动后访问 `http://localhost:8000/docs` 查看 Swagger UI。
+Docker Compose 启动后访问 `http://localhost:8100/docs` 查看 Swagger UI。
+
+本地直接运行 `uvicorn api.main:app --host 0.0.0.0 --port 8000` 时，访问 `http://localhost:8000/docs`。
 
 ### 端点
 
@@ -260,7 +267,7 @@ docker compose up -d
 | `fetch_weather` | `30 1 * * *` | 拉取 NWP 气象预报 → weather_forecast |
 | `daily_inference` | `0 2 * * *` | 特征 + 推理 → predictions 表 |
 | `validate_data` | `30 2 * * *` | 校验数据质量 → data_quality_log |
-| `refresh_token_and_fetch` | `0 12 * * *` | 补拉电网数据（备份） |
+| `refresh_token_and_fetch` | `0 8 * * *` | 08:00 补拉电网数据并重新推理覆盖预测（备份） |
 | `weekly_retrain` | `0 3 * * 0` | 全量重训练（Stage1 + Stage2） |
 | `hourly_health` | `0 * * * *` | 心跳日志 |
 
