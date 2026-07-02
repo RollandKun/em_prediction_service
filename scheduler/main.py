@@ -11,7 +11,7 @@ scheduler/main.py — 定时任务调度器（Phase 4）
   fetch_weather            30 1 * * *    每日 01:30 拉取今日 NWP 气象预报
   daily_inference          0 2 * * *     每日 02:00 执行推理 → predictions 表（9点前出第二天预测）
   validate_data            30 2 * * *    每日 02:30 校验昨日数据质量
-  refresh_token_and_fetch  0 12 * * *    每日 12:00 刷新 Token + 补拉电网数据（备份）
+  refresh_token_and_fetch  0 8 * * *     每日 08:00 刷新 Token + 补拉电网数据（备份）
   weekly_retrain           0 3 * * 0     每周日 03:00 全量重训练
   hourly_health            0 * * * *     每小时健康心跳
 
@@ -134,9 +134,9 @@ def job_refresh_token() -> dict:
 
 
 def job_refresh_token_and_fetch() -> dict:
-    """每日 12:00：重新登录获取新 token → 拉取昨日电网数据（备份）。
+    """每日 08:00：重新登录获取新 token → 拉取昨日电网数据（备份）。
 
-    即使凌晨 01:00 那次 fetch_grid 失败，中午也能补上。
+    即使凌晨 01:00 那次 fetch_grid 失败，早上也能补上。
     """
     logger.info("=" * 50)
     logger.info("JOB: refresh_token_and_fetch — 刷新 Token + 拉取电网数据")
@@ -152,9 +152,12 @@ def job_refresh_token_and_fetch() -> dict:
         from ingestion.grid_fetcher import fetch_grid_data
         yesterday = _yesterday_shanghai()
         n = fetch_grid_data(target_date=yesterday)
+        infer_result = job_daily_inference()
         elapsed = time.time() - start
-        logger.info(f"JOB: refresh_token_and_fetch 完成 — Token已刷新, 数据{n}条 ({elapsed:.1f}s)")
-        return {'ok': True, 'records': n, 'date': yesterday.isoformat(), 'elapsed': round(elapsed, 1)}
+        logger.info(f"JOB: refresh_token_and_fetch 完成 — Token已刷新, 数据{n}条, "
+                    f"inference_ok={infer_result.get('ok')} ({elapsed:.1f}s)")
+        return {'ok': True, 'records': n, 'date': yesterday.isoformat(),
+                'inference': infer_result, 'elapsed': round(elapsed, 1)}
     except Exception as e:
         elapsed = time.time() - start
         logger.error(f"JOB: refresh_token_and_fetch 失败 — {e}", exc_info=True)
@@ -293,17 +296,20 @@ def job_daily_inference() -> dict:
 
             with engine.connect() as conn:
                 with conn.begin():
+                    target_dates = sorted({
+                        pd.Timestamp(r['target_time']).date() for r in records
+                    })
+                    for target_date in target_dates:
+                        conn.execute(
+                            text("DELETE FROM predictions "
+                                 "WHERE target_time::date = :d "
+                                 "AND model_version = :model_version"),
+                            {'d': target_date, 'model_version': settings.feature_version},
+                        )
                     conn.execute(
-                        text("""
-                            INSERT INTO predictions
-                                (target_time, predicted_price, model_version, season, period)
-                            SELECT :target_time, :predicted_price, :model_version, :season, :period
-                            WHERE NOT EXISTS (
-                                SELECT 1 FROM predictions
-                                WHERE target_time = :target_time
-                                  AND model_version = :model_version
-                            )
-                        """),
+                        text("INSERT INTO predictions "
+                             "(target_time, predicted_price, model_version, season, period) "
+                             "VALUES (:target_time, :predicted_price, :model_version, :season, :period)"),
                         records,
                     )
                     conn.commit()
@@ -428,14 +434,15 @@ def job_daily_inference() -> dict:
                         with engine3.connect() as conn:
                             with conn.begin():
                                 conn.execute(
-                                    text("""INSERT INTO predictions
-                                        (target_time, predicted_price, model_version, season, period)
-                                        SELECT :target_time, :predicted_price, :model_version, :season, :period
-                                        WHERE NOT EXISTS (
-                                            SELECT 1 FROM predictions
-                                            WHERE target_time = :target_time
-                                              AND model_version = :model_version
-                                        )"""),
+                                    text("DELETE FROM predictions "
+                                         "WHERE target_time::date = :d "
+                                         "AND model_version = :model_version"),
+                                    {'d': td, 'model_version': settings.feature_version + '_lag192'},
+                                )
+                                conn.execute(
+                                    text("INSERT INTO predictions "
+                                         "(target_time, predicted_price, model_version, season, period) "
+                                         "VALUES (:target_time, :predicted_price, :model_version, :season, :period)"),
                                     records_lag,
                                 )
                                 conn.commit()
@@ -550,7 +557,7 @@ JOB_SCHEDULES = {
     'validate_data':              {'cron': '30 2 * * *',    'timezone': 'Asia/Shanghai'},
     'weekly_retrain':             {'cron': '0 3 * * 0',     'timezone': 'Asia/Shanghai'},
     'hourly_health':              {'cron': '0 * * * *',     'timezone': 'Asia/Shanghai'},
-    'refresh_token_and_fetch':    {'cron': '0 12 * * *',    'timezone': 'Asia/Shanghai'},
+    'refresh_token_and_fetch':    {'cron': '0 8 * * *',     'timezone': 'Asia/Shanghai'},
 }
 
 
