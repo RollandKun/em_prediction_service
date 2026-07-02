@@ -30,6 +30,7 @@ from fastapi.staticfiles import StaticFiles
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
 
 warnings.filterwarnings("ignore")
 
@@ -495,6 +496,8 @@ async def prediction_chart(date_str: str = Query(None, alias="date")):
     ax.set_title(f'电价预测 — {date_str}', fontsize=14, fontweight='bold')
     ax.legend(loc='upper right')
     ax.grid(axis='y', alpha=0.3)
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=10))
+    ax.margins(y=0.1)
     plt.tight_layout()
 
     buf = io.BytesIO()
@@ -645,6 +648,8 @@ async def history_chart(start: str = Query(..., alias="start"),
         ax.set_title(f'{d_str} — 实际 vs 预测电价', fontsize=16, fontweight='bold')
         ax.legend(fontsize=12, loc='upper right', framealpha=0.9)
         ax.grid(axis='y', alpha=0.25)
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=10))
+        ax.margins(y=0.1)
 
     else:
         # ── Multi-day: continuous timeline, two overlaid curves ──
@@ -695,6 +700,8 @@ async def history_chart(start: str = Query(..., alias="start"),
         ax.set_title(f'历史电价对比: {start} → {end}  (黑=实际, 橙=预测)', fontsize=16, fontweight='bold')
         ax.legend(fontsize=13, loc='upper right', framealpha=0.9)
         ax.grid(axis='y', alpha=0.2)
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=10))
+        ax.margins(y=0.1)
 
     plt.tight_layout()
     buf = io.BytesIO()
