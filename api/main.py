@@ -34,6 +34,29 @@ from matplotlib.ticker import MaxNLocator
 
 warnings.filterwarnings("ignore")
 
+
+def _set_price_axis(ax, *series, min_span=100.0):
+    """Keep price charts readable when data has a very small range."""
+    vals = []
+    for arr in series:
+        if arr is None:
+            continue
+        a = np.asarray(arr, dtype=float)
+        vals.extend(a[np.isfinite(a)].tolist())
+
+    if not vals:
+        ax.set_ylim(0, min_span)
+    else:
+        lo = float(min(vals))
+        hi = float(max(vals))
+        if hi - lo < min_span:
+            mid = (lo + hi) / 2.0
+            lo = mid - min_span / 2.0
+            hi = mid + min_span / 2.0
+        pad = max((hi - lo) * 0.08, 5.0)
+        ax.set_ylim(lo - pad, hi + pad)
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=8, integer=True))
+
 # ── Logging ──
 logger = logging.getLogger("api")
 logging.basicConfig(
@@ -459,16 +482,40 @@ async def list_models():
 @app.get("/api/v1/chart", responses={200: {"content": {"image/png": {}}}})
 async def prediction_chart(date_str: str = Query(None, alias="date")):
     """Return PNG chart of 96-period price prediction curve."""
-    cache = state["predictions_cache"]
-    if not cache:
-        raise HTTPException(503, "Predictions not yet computed.")
+    try:
+        from sqlalchemy import create_engine, text
+    except ImportError:
+        raise HTTPException(500, "SQLAlchemy not available")
 
+    engine = create_engine(settings.database_url_sync, echo=False)
     if date_str is None:
-        date_str = max(cache.keys())
-    if date_str not in cache:
+        with engine.connect() as conn:
+            r = conn.execute(text("SELECT MAX(target_time::date) FROM predictions")).scalar()
+            if r is None:
+                engine.dispose()
+                raise HTTPException(503, "No predictions available")
+            date_str = str(r)
+
+    pred_df = pd.read_sql(
+        "SELECT DISTINCT ON (target_time) target_time, predicted_price "
+        "FROM predictions "
+        "WHERE target_time::date = %(d)s "
+        "AND model_version IN (%(v)s, %(vl)s) "
+        "ORDER BY target_time, CASE WHEN model_version = %(v)s THEN 0 ELSE 1 END",
+        engine,
+        params={"d": date_str, "v": settings.feature_version, "vl": settings.feature_version + "_lag192"},
+    )
+    engine.dispose()
+
+    if len(pred_df) == 0:
         raise HTTPException(404, f"Date '{date_str}' not found.")
 
-    prices_arr = np.asarray(cache[date_str], dtype=float)
+    pred_df["target_time"] = pd.to_datetime(pred_df["target_time"])
+    prices_arr = np.full(96, np.nan)
+    for _, row in pred_df.iterrows():
+        p = row["target_time"].hour * 4 + row["target_time"].minute // 15
+        if 0 <= p < 96:
+            prices_arr[p] = float(row["predicted_price"])
     # Segment: period 0-35=base, 36-67=valley, 68-87=peak, 88-95=base
     seg_map = np.full(96, 'base', dtype=object)
     seg_map[36:68] = 'valley'
@@ -496,8 +543,7 @@ async def prediction_chart(date_str: str = Query(None, alias="date")):
     ax.set_title(f'电价预测 — {date_str}', fontsize=14, fontweight='bold')
     ax.legend(loc='upper right')
     ax.grid(axis='y', alpha=0.3)
-    ax.yaxis.set_major_locator(MaxNLocator(nbins=10))
-    ax.margins(y=0.1)
+    _set_price_axis(ax, prices_arr)
     plt.tight_layout()
 
     buf = io.BytesIO()
@@ -648,6 +694,7 @@ async def history_chart(start: str = Query(..., alias="start"),
             p = row["target_time"].hour * 4 + row["target_time"].minute // 15
             if 0 <= p < 96: p_arr[p] = float(row["predicted_price"])
         ax.plot(x, p_arr, '#E65100', lw=2.0, alpha=0.85, label='预测价格', zorder=4)
+        _set_price_axis(ax, a_arr, p_arr)
 
         ax.set_xlim(0, 95)
         ax.set_xticks(range(0, 96, 4))
@@ -662,8 +709,6 @@ async def history_chart(start: str = Query(..., alias="start"),
         ax.set_title(f'{d_str} — 实际 vs 预测电价', fontsize=16, fontweight='bold')
         ax.legend(fontsize=12, loc='upper right', framealpha=0.9)
         ax.grid(axis='y', alpha=0.25)
-        ax.yaxis.set_major_locator(MaxNLocator(nbins=10))
-        ax.margins(y=0.1)
 
     else:
         # ── Multi-day: continuous timeline, two overlaid curves ──
@@ -690,6 +735,7 @@ async def history_chart(start: str = Query(..., alias="start"),
 
         ax.plot(x_all, a_all, '#1a1a1a', lw=1.8, alpha=0.85, label='实际价格', zorder=5)
         ax.plot(x_all, p_all, '#E65100', lw=1.6, alpha=0.75, label='预测价格', zorder=4)
+        _set_price_axis(ax, a_all, p_all)
 
         # Day separator lines + date labels
         for i in range(n_days):
@@ -714,8 +760,6 @@ async def history_chart(start: str = Query(..., alias="start"),
         ax.set_title(f'历史电价对比: {start} → {end}  (黑=实际, 橙=预测)', fontsize=16, fontweight='bold')
         ax.legend(fontsize=13, loc='upper right', framealpha=0.9)
         ax.grid(axis='y', alpha=0.2)
-        ax.yaxis.set_major_locator(MaxNLocator(nbins=10))
-        ax.margins(y=0.1)
 
     plt.tight_layout()
     buf = io.BytesIO()
