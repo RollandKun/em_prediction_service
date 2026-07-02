@@ -299,7 +299,9 @@ def _fetch_from_api(target_date: date) -> list[dict]:
     # ── 构建记录：按时间索引对齐所有 series ──
     records = []
     for i, label in enumerate(time_labels):
-        dt = _parse_api_datetime(label)
+        # API labels are interval end times: 00:15..24:00.
+        # Store interval start times so each business day is 00:00..23:45.
+        dt = _parse_api_datetime(label) - pd.Timedelta(minutes=15)
 
         # 只保留目标日期的数据（24:00 会变成次日 00:00）
         if dt.date() != target_date:
