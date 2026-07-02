@@ -18,6 +18,7 @@ import argparse
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
 warnings.filterwarnings("ignore")
 
@@ -262,6 +263,21 @@ def blend_weights(period):
     return w
 
 
+def season_masks_for_inference(dry_mask, wet_mask, dt_arr):
+    """Map production inference rows to available seasonal model families.
+
+    Training currently has dry (Jan-Apr) and wet (May-Jun) models only. For
+    Jul-Sep rows we use the wet model as the closest fallback so forward-
+    extended rows can still produce prices instead of all-zero output.
+    """
+    dry = np.asarray(dry_mask, dtype=bool).copy()
+    wet = np.asarray(wet_mask, dtype=bool).copy()
+    months = pd.DatetimeIndex(pd.to_datetime(dt_arr)).month.values
+    wet |= np.isin(months, [7, 8, 9])
+    dry &= ~wet
+    return dry, wet
+
+
 # ====================================================================
 # Main prediction
 # ====================================================================
@@ -292,6 +308,7 @@ def run_inference(grid_lag=0):
     dry_mask = data['dry_mask']
     wet_mask = data['wet_mask']
     dt_arr = data['dt']
+    dry_mask, wet_mask = season_masks_for_inference(dry_mask, wet_mask, dt_arr)
 
     n = X_full.shape[0]
     logger.info(f"  Features: {n} rows × {X_full.shape[1]} dims  "

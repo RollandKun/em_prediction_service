@@ -8,6 +8,22 @@ import numpy as np, pandas as pd
 from sqlalchemy import create_engine, text
 from config import settings
 from pipeline.inference import run_inference
+from pipeline.data_loader import load_for_inference
+from pipeline.feature_engine import build_features
+from pipeline.output import save_outputs
+
+
+def rebuild_features(grid_lag=0, forward_extend=0):
+    loaded = load_for_inference(forward_extend=forward_extend)
+    (dt_arr, df, solar, wind, hydro, load, price,
+     bidspace, reserve, nonmarket, tieline, load_tie) = loaded
+    result = build_features(
+        dt_arr, df, solar, wind, hydro, load, price,
+        bidspace, reserve, nonmarket, tieline, load_tie,
+        grid_lag=grid_lag,
+    )
+    save_outputs(result, grid_lag=grid_lag)
+    return result
 
 def build(pp, dt, period):
     res = {}
@@ -18,6 +34,10 @@ def build(pp, dt, period):
         if 0 <= p < 96:
             res[d][p] = pp[i]
     return res
+
+print("Rebuilding latest features...")
+rebuild_features(grid_lag=0, forward_extend=0)
+rebuild_features(grid_lag=192, forward_extend=192)
 
 print("Running inference...")
 result_normal = run_inference(grid_lag=0)

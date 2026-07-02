@@ -72,6 +72,7 @@ from config import settings
 from pipeline.inference import (
     load_stage1_models, load_stage2_models,
     predict_stage1, build_stage2_features, blend_weights,
+    season_masks_for_inference,
 )
 
 from api.schemas import (
@@ -233,6 +234,7 @@ def _precompute_predictions(m1, m2, X_full, feat_names, period, price,
                            dry_mask, wet_mask, dt_arr):
     """Run full inference and cache by date. Skips dates already in cache."""
     n = X_full.shape[0]
+    dry_mask, wet_mask = season_masks_for_inference(dry_mask, wet_mask, dt_arr)
 
     # Stage1
     oof_s = np.full(n, np.nan); oof_h = np.full(n, np.nan)
@@ -551,12 +553,14 @@ async def prediction_chart(date_str: str = Query(None, alias="date")):
     seg_colors = {'valley': '#4CAF50', 'peak': '#F44336', 'base': '#2196F3'}
     seg_labels = {'valley': '午谷', 'peak': '晚峰', 'base': '基荷'}
 
+    x = np.arange(96)
+    valid_prices = np.isfinite(prices_arr)
     for seg in ['base', 'valley', 'peak']:
-        mask = seg_map == seg
-        ax.fill_between(range(96), 0, prices_arr, where=mask,
+        mask = (seg_map == seg) & valid_prices
+        ax.fill_between(x, 0, prices_arr, where=mask,
                         color=seg_colors[seg], alpha=0.3, label=seg_labels[seg])
 
-    ax.plot(range(96), prices_arr, 'k-', lw=1.2, alpha=0.8)
+    ax.plot(x, prices_arr, 'k-', lw=1.2, alpha=0.8)
     ax.set_xlim(0, 95)
     ax.set_xticks(range(0, 96, 4))
     ax.set_xticklabels([f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 15, 30, 45)][::4],
@@ -566,6 +570,7 @@ async def prediction_chart(date_str: str = Query(None, alias="date")):
     ax.legend(loc='upper right')
     ax.grid(axis='y', alpha=0.3)
     _set_price_axis(ax, prices_arr)
+    ax.axhline(0, color='#666666', lw=0.8, alpha=0.75, zorder=2)
     plt.tight_layout()
 
     buf = io.BytesIO()
@@ -717,6 +722,7 @@ async def history_chart(start: str = Query(..., alias="start"),
             if 0 <= p < 96: p_arr[p] = float(row["predicted_price"])
         ax.plot(x, p_arr, '#E65100', lw=2.0, alpha=0.85, label='预测价格', zorder=4)
         _set_price_axis(ax, a_arr, p_arr)
+        ax.axhline(0, color='#666666', lw=0.8, alpha=0.75, zorder=2)
 
         ax.set_xlim(0, 95)
         ax.set_xticks(range(0, 96, 4))
@@ -758,6 +764,7 @@ async def history_chart(start: str = Query(..., alias="start"),
         ax.plot(x_all, a_all, '#1a1a1a', lw=1.8, alpha=0.85, label='实际价格', zorder=5)
         ax.plot(x_all, p_all, '#E65100', lw=1.6, alpha=0.75, label='预测价格', zorder=4)
         _set_price_axis(ax, a_all, p_all)
+        ax.axhline(0, color='#666666', lw=0.8, alpha=0.75, zorder=2)
 
         # Day separator lines + date labels
         for i in range(n_days):

@@ -211,7 +211,10 @@ def job_daily_inference() -> dict:
         from pipeline.inference import (
             load_stage1_models, load_stage2_models,
             predict_stage1, build_stage2_features, blend_weights,
+            season_masks_for_inference,
         )
+
+        dry_mask, wet_mask = season_masks_for_inference(dry_mask, wet_mask, dt_arr)
 
         m1 = load_stage1_models()
         m2 = load_stage2_models()
@@ -342,6 +345,7 @@ def job_daily_inference() -> dict:
                 price_lag = result_lag['price']
                 dry_lag = result_lag['dry_mask']
                 wet_lag = result_lag['wet_mask']
+                dry_lag, wet_lag = season_masks_for_inference(dry_lag, wet_lag, dt_arr_lag)
 
                 oof_s_lag = np.full(n_lag, np.nan); oof_h_lag = np.full(n_lag, np.nan)
                 oof_w_lag = np.full(n_lag, np.nan); oof_l_lag = np.full(n_lag, np.nan)
