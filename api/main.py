@@ -388,10 +388,13 @@ async def get_predictions(date_str: str = Query(None, alias="date")):
     # Query predictions for the date
     import pandas as pd
     pred_df = pd.read_sql(
-        "SELECT target_time, predicted_price FROM predictions "
-        "WHERE target_time::date = %(d)s AND model_version = %(v)s ORDER BY target_time",
+        "SELECT DISTINCT ON (target_time) target_time, predicted_price, model_version "
+        "FROM predictions "
+        "WHERE target_time::date = %(d)s "
+        "AND model_version IN (%(v)s, %(vl)s) "
+        "ORDER BY target_time, CASE WHEN model_version = %(v)s THEN 0 ELSE 1 END",
         engine,
-        params={"d": date_str, "v": settings.feature_version},
+        params={"d": date_str, "v": settings.feature_version, "vl": settings.feature_version + "_lag192"},
     )
     engine.dispose()
 
@@ -416,7 +419,7 @@ async def get_predictions(date_str: str = Query(None, alias="date")):
     prices = [p["price"] for p in preds]
     return PredictionsResponse(
         date=date_str,
-        model_version=settings.feature_version,
+        model_version=str(pred_df["model_version"].iloc[0]) if len(pred_df) else settings.feature_version,
         generated_at=datetime.now().isoformat(),
         predictions=preds,
         summary={
@@ -431,10 +434,7 @@ async def get_predictions(date_str: str = Query(None, alias="date")):
 @app.get("/api/v1/predictions/latest", response_model=PredictionsResponse)
 async def get_latest_predictions():
     """Get predictions for the most recent available date."""
-    if not state["predictions_cache"]:
-        raise HTTPException(503, "No predictions available.")
-    latest = max(state["predictions_cache"].keys())
-    return await get_predictions(date_str=latest)
+    return await get_predictions()
 
 
 @app.get("/api/v1/models", response_model=ModelsResponse)
@@ -532,10 +532,17 @@ async def get_history(start: str = Query(..., alias="start", description="YYYY-M
 
     # Fetch predicted prices
     pred_df = pd.read_sql(
-        "SELECT target_time, predicted_price FROM predictions "
-        "WHERE target_time >= %(s)s AND target_time < %(e)s AND model_version = %(v)s ORDER BY target_time",
+        "SELECT DISTINCT ON (target_time) target_time, predicted_price FROM predictions "
+        "WHERE target_time >= %(s)s AND target_time < %(e)s "
+        "AND model_version IN (%(v)s, %(vl)s) "
+        "ORDER BY target_time, CASE WHEN model_version = %(v)s THEN 0 ELSE 1 END",
         engine,
-        params={"s": f"{start} 00:00:00", "e": f"{end} 23:59:59", "v": settings.feature_version},
+        params={
+            "s": f"{start} 00:00:00",
+            "e": f"{end} 23:59:59",
+            "v": settings.feature_version,
+            "vl": settings.feature_version + "_lag192",
+        },
     )
     pred_df["target_time"] = pd.to_datetime(pred_df["target_time"])
     engine.dispose()
@@ -590,10 +597,17 @@ async def history_chart(start: str = Query(..., alias="start"),
     actual_df["datetime"] = pd.to_datetime(actual_df["datetime"])
 
     pred_df = pd.read_sql(
-        "SELECT target_time, predicted_price FROM predictions "
-        "WHERE target_time >= %(s)s AND target_time < %(e)s AND model_version = %(v)s ORDER BY target_time",
+        "SELECT DISTINCT ON (target_time) target_time, predicted_price FROM predictions "
+        "WHERE target_time >= %(s)s AND target_time < %(e)s "
+        "AND model_version IN (%(v)s, %(vl)s) "
+        "ORDER BY target_time, CASE WHEN model_version = %(v)s THEN 0 ELSE 1 END",
         engine,
-        params={"s": f"{start} 00:00:00", "e": f"{end} 23:59:59", "v": settings.feature_version},
+        params={
+            "s": f"{start} 00:00:00",
+            "e": f"{end} 23:59:59",
+            "v": settings.feature_version,
+            "vl": settings.feature_version + "_lag192",
+        },
     )
     pred_df["target_time"] = pd.to_datetime(pred_df["target_time"])
     engine.dispose()

@@ -285,7 +285,12 @@ def job_daily_inference() -> dict:
                         text("""
                             INSERT INTO predictions
                                 (target_time, predicted_price, model_version, season, period)
-                            VALUES (:target_time, :predicted_price, :model_version, :season, :period)
+                            SELECT :target_time, :predicted_price, :model_version, :season, :period
+                            WHERE NOT EXISTS (
+                                SELECT 1 FROM predictions
+                                WHERE target_time = :target_time
+                                  AND model_version = :model_version
+                            )
                         """),
                         records,
                     )
@@ -424,8 +429,12 @@ def job_daily_inference() -> dict:
                                 conn.execute(
                                     text("""INSERT INTO predictions
                                         (target_time, predicted_price, model_version, season, period)
-                                        VALUES (:target_time, :predicted_price, :model_version, :season, :period)
-                                        ON CONFLICT (target_time) DO NOTHING"""),
+                                        SELECT :target_time, :predicted_price, :model_version, :season, :period
+                                        WHERE NOT EXISTS (
+                                            SELECT 1 FROM predictions
+                                            WHERE target_time = :target_time
+                                              AND model_version = :model_version
+                                        )"""),
                                     records_lag,
                                 )
                                 conn.commit()
