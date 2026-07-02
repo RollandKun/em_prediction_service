@@ -7,7 +7,7 @@
 ```
 em_prediction_service/
 ├── api/                        # FastAPI 接口
-│   ├── main.py                 #   App + lifespan + 4 endpoints
+│   ├── main.py                 #   App + lifespan + 8 endpoints
 │   └── schemas.py              #   Pydantic models
 ├── ingestion/                  # 数据采集层
 │   ├── grid_fetcher.py         #   电网数据采集（lingfeng-saas API）
@@ -17,7 +17,7 @@ em_prediction_service/
 │   └── import_historical.py    #   一次性历史数据导入
 ├── pipeline/                   # ML 管线
 │   ├── data_loader.py          #   DB → numpy 数组（替代 Excel 读取）
-│   ├── feature_engine.py       #   特征工程（DB → 185 维, A-P 组, 集群平均）
+│   ├── feature_engine.py       #   特征工程（DB → 177 维, A-P 组, 集群平均）
 │   ├── output.py               #   保存 npz + 验证 vs 参考
 │   ├── train_stage1.py         #   Stage1 训练（4 变量 × 枯/丰 = 8 模型）
 │   ├── train_stage2.py         #   Stage2 训练（3 时段 × 枯/丰 = 6 模型）
@@ -39,7 +39,7 @@ em_prediction_service/
 
 ```
 电网数据 (15min) ──┐
-                   ├──→ 特征工程 (185 维, A–P 组, 两阶段天气融合) ──→ Stage1 (4 XGBoost)
+                   ├──→ 特征工程 (177 维, A–P 组, 两阶段天气融合) ──→ Stage1 (4 XGBoost)
 气象数据 (hourly) ─┘                                                    ├─ solar[t+96]
     ↑                                                                   ├─ hydro[t+96]
     Open-Meteo ECMWF (19 子节点 × 6 变量)                              ├─ wind[t+96]
@@ -100,7 +100,7 @@ cp .env.example .env
 | `DATABASE_URL` | 异步数据库 URL (asyncpg) | `postgresql+asyncpg://em_user:em_pass_2026@localhost:5432/em_prediction` |
 | `DATABASE_URL_SYNC` | 同步数据库 URL (psycopg2) | `postgresql+psycopg2://em_user:em_pass_2026@localhost:5432/em_prediction` |
 | `MODEL_DIR` | 模型文件目录 | `./models` |
-| `FEATURE_VERSION` | 特征版本号 | `v11` |
+| `FEATURE_VERSION` | 特征版本号 | `v14` |
 
 ### 2. 数据库
 
@@ -212,7 +212,7 @@ docker compose up -d
 ```json
 {
   "date": "2026-06-06",
-  "model_version": "v11",
+  "model_version": "v14",
   "generated_at": "2026-06-23T10:00:00",
   "predictions": [
     {"period": 0,  "time": "00:00", "price": 245.5, "segment": "base"},
@@ -370,7 +370,7 @@ EM_Pre3/                           # 实验分析项目（参考，不修改）
     └── Stage2/output/models/*.pkl         ← 初始模型权重（ERA5 数据）
 
 em_prediction_service/             # 生产服务（本项目）
-    ├── pipeline/feature_engine.py   ← 升级版：Open-Meteo ECMWF + 集群平均 + 185 维
+    ├── pipeline/feature_engine.py   ← 升级版：Open-Meteo ECMWF + 集群平均 + 177 维
     ├── pipeline/train_stage1.py     ← 移植版，适配新变量名（D_rad_avg_pp 等）
     ├── pipeline/train_stage2.py     ← 移植版 (RF+XGB 残差, v14)
     └── models/                      ← 自训练模型（需用新数据重训练）

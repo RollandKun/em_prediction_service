@@ -39,7 +39,7 @@ em_prediction_service/
 │
 ├── pipeline/                           # 核心推理 + 训练管线
 │   ├── data_loader.py                  ← DB → DataFrame + numpy 数组
-│   ├── feature_engine.py               ← 185 维特征构建（DB 适配版）
+│   ├── feature_engine.py               ← 177 维特征构建（DB 适配版）
 │   ├── inference.py                    ← 完整推理链（Stage1 + Stage2）
 │   ├── train_stage1.py                 ← Stage1 训练（8 Normal + 8 Lag_192 = 16 模型）
 │   ├── train_stage2.py                 ← Stage2 训练（6 Normal + 6 Lag_192 = 12 模型）
@@ -133,7 +133,7 @@ em_prediction_service/
 ┌──────────────────────────────────────────────────────────┐
 │                    Stage 1 (4 变量)                       │
 │                                                          │
-│  185 维特征 ─┬─→ XGBoost 光伏模型 → 光伏[t+96]            │
+│  177 维特征 ─┬─→ XGBoost 光伏模型 → 光伏[t+96]            │
 │              ├─→ XGBoost 水电模型 → 水电[t+96]            │
 │              ├─→ XGBoost 风电模型 → 风电[t+96]            │
 │              └─→ XGBoost 负荷模型 → 负荷[t+96]            │
@@ -224,7 +224,7 @@ Lag_192:    grid[t-192] → feature[t]     → price[t+96]  (forward_extend=192)
 
 ---
 
-## 5. 特征体系（185 维，A–P 组）
+## 5. 特征体系（177 维，A–P 组）
 
 | 组 | 内容 | 维度 | 安全滞后 |
 |----|------|------|----------|
@@ -268,7 +268,7 @@ GET /api/v1/predictions?date=2026-06-25
 
 {
   "date": "2026-06-25",
-  "model_version": "v13",
+  "model_version": "v14",
   "generated_at": "2026-06-25T02:00:05",
   "predictions": [
     {"period": 0, "time": "00:00", "price": 245.3, "segment": "base"},
@@ -335,7 +335,7 @@ python -m scheduler.main --list             # 列出所有任务
                ↓
 ┌─────────────────────────────────────────────────────────┐
 │  2. 特征工程 (feature_engine)                            │
-│     185 维构建 (A-P 组) → 时变安全筛选                    │
+│     177 维构建 (A-P 组) → 时变安全筛选                    │
 │     → features_15min_dry.npz + features_15min_wet.npz   │
 └──────────────┬──────────────────────────────────────────┘
                ↓

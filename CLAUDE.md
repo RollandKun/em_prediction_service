@@ -34,7 +34,7 @@ em_prediction_service/
 │
 ├── pipeline/                          ← ML pipeline
 │   ├── data_loader.py                 ← DB → numpy arrays (PostgreSQL read)
-│   ├── feature_engine.py              ← 185-dim feature matrix (A-P groups)
+│   ├── feature_engine.py              ← 177-dim feature matrix (A-P groups)
 │   ├── output.py                      ← Save npz + verify vs reference
 │   ├── train_stage1.py                ← Stage1: 4 vars × 2 seasons = 8 models
 │   ├── train_stage2.py                ← Stage2: 3 periods × 2 seasons = 6 models
@@ -151,7 +151,7 @@ with valid features from grid[t-192] → predicts 2 extra days.
        +────────────── data_loader.py ──────────────+
                             |
                             v
-              feature_engine.py (185 dims, A-P)
+              feature_engine.py (177 dims, A-P)
                             |
                             v
        pipeline/output/features_15min_{dry,wet}.npz
@@ -173,7 +173,7 @@ with valid features from grid[t-192] → predicts 2 extra days.
         models/price_*.pkl
 ```
 
-### Feature Groups (185 dims, A–P)
+### Feature Groups (177 dims, A–P)
 
 | Group | Content | Dims |
 |---|---|---|
