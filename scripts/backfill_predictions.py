@@ -47,8 +47,23 @@ lag = build(result_lag['price_pred'], result_lag['dt'], result_lag['period'])
 
 engine = create_engine(settings.database_url_sync, echo=False)
 total = 0
+normal_label = settings.feature_version
+lag_label = settings.feature_version + '_lag192'
+last_normal_date = max(normal) if normal else None
 
-for label, preds in [('v14', normal), ('v14_lag192', lag)]:
+if last_normal_date:
+    with engine.connect() as conn:
+        with conn.begin():
+            conn.execute(
+                text("DELETE FROM predictions "
+                     "WHERE model_version = :v AND target_time::date <= :d"),
+                {'v': lag_label, 'd': last_normal_date},
+            )
+            conn.commit()
+    lag = {d: arr for d, arr in lag.items() if d > last_normal_date}
+    print(f"Lag192 gap-fill starts after {last_normal_date}: {len(lag)} dates")
+
+for label, preds in [(normal_label, normal), (lag_label, lag)]:
     for d_str in sorted(preds):
         arr = preds[d_str]
         records = []

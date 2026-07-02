@@ -146,7 +146,7 @@ async function querySingle() {
   info.textContent = '查询中...';
   res.innerHTML = '';
   try {
-    const r = await fetch(API+'/api/v1/predictions?date='+d);
+    const r = await fetch(API+'/api/v1/predictions?date='+d+'&_='+Date.now(), {cache:'no-store'});
     if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
     const data = await r.json();
     info.textContent = `模型: ${data.model_version} | 生成: ${data.generated_at}`;
@@ -180,11 +180,21 @@ async function querySingleChart() {
   const res = document.getElementById('s-result');
   if (!d) return;
   res.innerHTML = '<span class="loading">加载图表...</span>';
-  const img = new Image();
-  img.className = 'chart-img';
-  img.src = API+'/api/v1/chart?date='+d;
-  img.onload = () => { res.innerHTML = `<h3>📈 ${d} 预测曲线</h3>`; res.appendChild(img); };
-  img.onerror = () => { res.innerHTML = `<div class="error">❌ 图表加载失败 (${d})</div>`; };
+  try {
+    const r = await fetch(API+'/api/v1/chart?date='+d+'&_='+Date.now(), {cache:'no-store'});
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || r.statusText);
+    }
+    const img = new Image();
+    img.className = 'chart-img';
+    img.src = URL.createObjectURL(await r.blob());
+    img.onload = () => URL.revokeObjectURL(img.src);
+    res.innerHTML = `<h3>📈 ${d} 预测曲线</h3>`;
+    res.appendChild(img);
+  } catch(e) {
+    res.innerHTML = `<div class="error">❌ 图表加载失败 (${d}): ${e.message}</div>`;
+  }
 }
 
 // ── History ──
@@ -197,7 +207,7 @@ async function queryHistory() {
   info.textContent = '查询中...';
   res.innerHTML = '';
   try {
-    const r = await fetch(API+'/api/v1/predictions/history?start='+s+'&end='+e);
+    const r = await fetch(API+'/api/v1/predictions/history?start='+s+'&end='+e+'&_='+Date.now(), {cache:'no-store'});
     if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
     const data = await r.json();
     info.textContent = `${data.days.length} 天`;
@@ -225,11 +235,21 @@ async function queryHistoryChart() {
   const res = document.getElementById('h-result');
   if (!s || !e) return;
   res.innerHTML = '<span class="loading">加载图表...</span>';
-  const img = new Image();
-  img.className = 'chart-img';
-  img.src = API+'/api/v1/chart/history?start='+s+'&end='+e;
-  img.onload = () => { res.innerHTML = `<h3>📈 ${s} → ${e} 对比曲线</h3>`; res.appendChild(img); };
-  img.onerror = () => { res.innerHTML = `<div class="error">❌ 图表加载失败</div>`; };
+  try {
+    const r = await fetch(API+'/api/v1/chart/history?start='+s+'&end='+e+'&_='+Date.now(), {cache:'no-store'});
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || r.statusText);
+    }
+    const img = new Image();
+    img.className = 'chart-img';
+    img.src = URL.createObjectURL(await r.blob());
+    img.onload = () => URL.revokeObjectURL(img.src);
+    res.innerHTML = `<h3>📈 ${s} → ${e} 对比曲线</h3>`;
+    res.appendChild(img);
+  } catch(e) {
+    res.innerHTML = `<div class="error">❌ 图表加载失败: ${e.message}</div>`;
+  }
 }
 
 // Init
