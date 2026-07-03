@@ -371,7 +371,7 @@ def job_daily_inference() -> dict:
                                                  oof_w_lag, oof_l_lag, period_lag,
                                                  safe_indices=safe_idx_lag)
 
-                anchor_l, _, _ = price_anchor_from_lags(price_lag, lags=(672,))
+                anchor_l, _, _ = price_anchor_from_lags(price_lag, lags=(192, 672))
 
                 price_pred_lag = np.full(n_lag, np.nan)
                 for season, mask in [('dry', dry_lag), ('wet', wet_lag)]:

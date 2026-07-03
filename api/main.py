@@ -210,7 +210,7 @@ async def lifespan(app: FastAPI):
                                     lag_data["X"], lag_data["feat_names"],
                                     lag_data["period"], lag_data["price"],
                                     lag_data["dry_mask"], lag_data["wet_mask"],
-                                    lag_data["dt"], anchor_lags=(672,))
+                                    lag_data["dt"], anchor_lags=(192, 672))
             n_new = len(state["predictions_cache"]) - n_before
             logger.info(f"  Gap-fill: +{n_new} new dates via lag_192  "
                         f"({time.time()-t5:.1f}s)")

@@ -198,7 +198,7 @@ Lag_192:    grid[t-192] → feature[t]     → price[t+96]  (forward_extend=192)
 
 Stage2 价格锚点同步使用延迟容忍逻辑：
 - Normal: `price[t-96]` 与 `price[t-672]` 取平均，缺一个则用另一个。
-- Lag_192: 仅使用 `price[t-672]`（上周同刻），不再与前天同刻取平均。
+- Lag_192: `price[t-192]` 与 `price[t-672]` 取平均，缺一个则用另一个。
 
 ### 4.4 模型文件格式
 
@@ -505,4 +505,4 @@ curl http://localhost:8100/api/v1/predictions/latest
 | v13 | 2026-06 | 生产推理: 枯水 RF 残差 + 丰水 XGB 绝对值 → Stage2 首次全面超越 lag96 基线 |
 | v13+ | 2026-06 | 日志全链路覆盖 + Bug 修复（枯水期定义、空 m2 崩溃防护、静默 NaN 告警） |
 | **v14 (Lag_192 + Wet Residual)** | 2026-06 | **延迟容忍架构**: 14 个 lag_192 模型 + forward_extend horizon 延伸 + API 双模型集自动切换 + 调度器 gap-fill pass + **丰水 XGB 改残差策略**（避免日曲线全同过拟合） |
-| **v14 ops update** | 2026-07 | 08:00 补拉昨日电网数据后自动重跑推理并覆盖预测；Lag_192 Stage2 锚点改为仅使用 `price[t-672]` 上周同刻；7/8/9 月按 wet 模型兜底 |
+| **v14 ops update** | 2026-07 | 08:00 补拉昨日电网数据后自动重跑推理并覆盖预测；Lag_192 Stage2 锚点改为 `price[t-192]` 与 `price[t-672]` 均值；7/8/9 月按 wet 模型兜底 |

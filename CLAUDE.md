@@ -116,7 +116,7 @@ Lag_192 — Same pipeline, but grid[t] replaced by grid[t-192] (2-day lag).
 
 Stage2 price anchors:
 - Normal: average `price[t-96]` and `price[t-672]`, falling back to whichever exists.
-- Lag_192: use only `price[t-672]` (same time last week).
+- Lag_192: average `price[t-192]` and `price[t-672]`, falling back to whichever exists.
 
 ### Lag_192 Gap-Fill Architecture (Phase 9)
 
@@ -237,7 +237,7 @@ with valid features from grid[t-192] → predicts 2 extra days.
 
 **Lag_192 (grid[t-192] → price[t+96])**:
 - Same residual architecture, trained on grid_lag=192 features
-- Anchor = `price[t-672]` (same time last week)
+- Anchor = average of `price[t-192]` and `price[t-672]`, falling back to available history
 - **Dry R²=0.14 MAE=31.28 | Wet R²=0.18 MAE=55.50** ✅ 均击败 lag96 基线
 - Gap-fill 兜底: 精度下降 6-7%，但比无预测好
 

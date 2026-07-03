@@ -156,10 +156,7 @@ def load_all_data(grid_lag=0):
     price_t96 = price_t + y_resid         # price[t+96]
     lag96 = data_dry['price_lag96']
     lag672 = np.roll(price_t, 672); lag672[:672] = np.nan
-    if grid_lag > 0:
-        anchor = lag672                    # Lag 模型只用上周同刻基线
-    else:
-        anchor = (lag96 + lag672) / 2.0    # Normal 模型用昨日/上周均值基线
+    anchor = (lag96 + lag672) / 2.0       # 昨周均值基线
 
     period = data_dry['period']
     idx_dry_train = data_dry['idx_train']; idx_dry_val = data_dry['idx_val']

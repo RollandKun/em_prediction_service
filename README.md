@@ -65,7 +65,7 @@ Lag_192 管道:  grid[t-192] + weather[t], weather_forecast[t+96]  → price[t+9
 
 Stage2 价格锚点：
 - Normal：`price[t-96]` 与 `price[t-672]` 均值（缺一个则用另一个）
-- Lag_192：仅使用 `price[t-672]`（上周同刻）
+- Lag_192：`price[t-192]` 与 `price[t-672]` 均值（缺一个则用另一个）
 
 **推理路径自动选择**:
 

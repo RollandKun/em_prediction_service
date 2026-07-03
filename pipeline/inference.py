@@ -372,9 +372,7 @@ def run_inference(grid_lag=0):
                                   period, safe_indices=safe_idx)
     logger.info(f"  Stage2 input: {X_s2.shape[1]} dims  ({time.time()-t0:.1f}s)")
 
-    # Lag models use stale grid inputs, but the price anchor should stay tied
-    # to the stable weekly same-time price instead of averaging with stale D-2.
-    anchor_lags = (672,) if grid_lag > 0 else (96, 672)
+    anchor_lags = (grid_lag, 672) if grid_lag > 0 else (96, 672)
     anchor, lag96, lag672 = price_anchor_from_lags(price, lags=anchor_lags)
 
     price_pred = np.full(n, np.nan)
