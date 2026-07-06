@@ -272,8 +272,10 @@ Docker Compose 启动后访问 `http://localhost:8100/docs` 查看 Swagger UI。
 | `daily_inference` | `0 2 * * *` | 特征 + 推理 → predictions 表 |
 | `validate_data` | `30 2 * * *` | 校验数据质量 → data_quality_log |
 | `refresh_token_and_fetch` | `0 8 * * *` | 08:00 补拉电网/气象实况，并重新推理覆盖预测（备份） |
-| `weekly_retrain` | `0 3 * * 0` | 全量重训练（Stage1 + Stage2） |
+| `weekly_retrain` | `0 3 * * 0` | 全量重训练 28 个模型，并立即推理刷新 predictions |
 | `hourly_health` | `0 * * * *` | 心跳日志 |
+
+Docker Compose 会将宿主机的 `./models` 与 `./pipeline/output` 同时挂载到 `api` 和 `scheduler` 容器，确保定时重训产出的模型、OOF 和特征文件可被后续推理复用。
 
 ### 手动触发
 

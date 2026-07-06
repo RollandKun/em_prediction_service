@@ -14,6 +14,9 @@ services:
       GRID_API_PASSWORD: QEtJpYDmw4fsIV01tCBX8A==
       GRID_API_PLATFORM: qIVR9X+IEPeEAwa+0kWRaQ==
       GRID_LOGIN_URL: https://lingfeng-saas.tradingthink.cn/api/auth/login/v3
+    volumes:
+      - ./models:/app/models
+      - ./pipeline/output:/app/pipeline/output
     deploy:
       resources:
         limits:
@@ -31,6 +34,9 @@ services:
       GRID_API_PASSWORD: QEtJpYDmw4fsIV01tCBX8A==
       GRID_API_PLATFORM: qIVR9X+IEPeEAwa+0kWRaQ==
       GRID_LOGIN_URL: https://lingfeng-saas.tradingthink.cn/api/auth/login/v3
+    volumes:
+      - ./models:/app/models
+      - ./pipeline/output:/app/pipeline/output
     deploy:
       resources:
         limits:

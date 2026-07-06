@@ -283,9 +283,10 @@ a true holdout.
 - **Inference**: `pipeline/inference.py`
 - **API**: `api/main.py` (FastAPI, 8 endpoints)
 - **Scheduler**: `scheduler/main.py` (APScheduler, 8 jobs)
-- **Production schedule**: daily inference at 02:00 CST; grid fetch also backfills same-day weather_obs; backup grid/weather_obs fetch + inference overwrite at 08:00 CST; weekly retrain Sunday 03:00 CST
+- **Production schedule**: daily inference at 02:00 CST; grid fetch also backfills same-day weather_obs; backup grid/weather_obs fetch + inference overwrite at 08:00 CST; weekly retrain Sunday 03:00 CST then immediate inference refresh
 - **Base table export**: `export_base_table.py`
 - **Models (28 .pkl)**: `models/` (14 Normal + 14 Lag_192)
 - **Feature npz**: `pipeline/output/features_15min_{dry,wet}.npz`
+- **Shared runtime artifacts**: `docker-compose.yml` mounts `./models` and `./pipeline/output` into both `api` and `scheduler`
 - **Reference project**: `G:\JAVA_Internship\EM_Pre3\`
 - **Reference V9**: `G:\JAVA_Internship\EM_Prediction2\v9\`

@@ -12,7 +12,7 @@ scheduler/main.py — 定时任务调度器（Phase 4）
   daily_inference          0 2 * * *     每日 02:00 执行推理 → predictions 表（9点前出第二天预测）
   validate_data            30 2 * * *    每日 02:30 校验昨日数据质量
   refresh_token_and_fetch  0 8 * * *     每日 08:00 刷新 Token + 补拉电网/气象实况（备份）
-  weekly_retrain           0 3 * * 0     每周日 03:00 全量重训练
+  weekly_retrain           0 3 * * 0     每周日 03:00 全量重训练 + 推理刷新
   hourly_health            0 * * * *     每小时健康心跳
 
 注意：
@@ -534,12 +534,12 @@ def job_validate_data() -> dict:
 
 
 def job_weekly_retrain() -> dict:
-    """全量重训练（Stage1 + Stage2）→ 更新模型文件。
+    """全量重训练（Stage1 + Stage2）→ 更新模型文件 → 刷新预测结果。
 
-    每周日 02:00 执行：数据积累一周后，在系统负载最低时重训练。
-    内存需求 ~4GB（加载全量特征 + 训练 14 个模型）。
+    每周日 03:00 执行：数据积累一周后，在系统负载最低时重训练。
+    内存需求 ~4GB（加载全量特征 + 训练 28 个模型）。
 
-    当前对接 Phase 3 完成的 train_stage1.py / train_stage2.py。
+    训练完成后立即执行 daily_inference，将新模型预测写入 predictions 表。
     """
     logger.info("=" * 50)
     logger.info("JOB: weekly_retrain — 全量重训练")
@@ -574,9 +574,14 @@ def job_weekly_retrain() -> dict:
         logger.info("  [retrain] Stage2 Lag_192: valley/peak/base × dry/wet")
         train_stage2(grid_lag=192)
 
+        logger.info("  [retrain] 训练完成，使用新模型刷新预测")
+        infer_result = job_daily_inference()
+
         elapsed = time.time() - start
-        logger.info(f"JOB: weekly_retrain 完成 ({elapsed:.1f}s)")
-        return {'ok': True, 'elapsed': round(elapsed, 1)}
+        logger.info(f"JOB: weekly_retrain 完成 — "
+                    f"inference_ok={infer_result.get('ok')} ({elapsed:.1f}s)")
+        return {'ok': True, 'inference': infer_result,
+                'elapsed': round(elapsed, 1)}
     except Exception as e:
         elapsed = time.time() - start
         logger.error(f"JOB: weekly_retrain 失败 — {e}", exc_info=True)

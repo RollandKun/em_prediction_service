@@ -313,7 +313,7 @@ GET /api/v1/predictions?date=2026-06-25
 | 02:00 | `daily_inference` | 特征工程 → Stage1 → Stage2 → 写入 predictions 表 |
 | 02:30 | `validate_data` | 校验昨日数据质量（完整性、值域） |
 | 08:00 | `refresh_token_and_fetch` | 早上备份：刷新 Token + 补拉昨日电网/气象实况，并重新推理覆盖预测 |
-| 每周日 03:00 | `weekly_retrain` | 全量重训练（28 个模型，~4GB 内存） |
+| 每周日 03:00 | `weekly_retrain` | 全量重训练（28 个模型，~4GB 内存）并立即刷新预测 |
 | 每小时 | `hourly_health` | 心跳日志 |
 
 ### 调度器启动方式
@@ -402,8 +402,11 @@ scheduler::job_weekly_retrain()
         ├── 枯水：RandomForest 预测 anchor残差
         ├── 丰水：XGBoost 预测残差（v14 统一策略）
         ├── 保存 6 个 .pkl (含 safe_indices)
-        └── 写入 model_versions 表
+        ├── 写入 model_versions 表
+        └── 调用 daily_inference() 用新模型刷新 predictions 表
 ```
+
+`docker-compose.yml` 将宿主机 `./models` 与 `./pipeline/output` 同时挂载到 `api` 和 `scheduler`，避免重训产物只留在单个容器内部。
 
 ---
 
