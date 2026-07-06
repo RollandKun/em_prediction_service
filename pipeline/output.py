@@ -11,6 +11,7 @@ Usage:
     verify()
 """
 import sys
+import json
 from pathlib import Path
 
 import numpy as np
@@ -45,20 +46,61 @@ _WET_TEST_END    = np.datetime64("2026-06-06")
 # (-0.93 vs +0.26 R²). Late June has fundamentally different pricing dynamics
 # from early June. Will revisit when 7-8月 main flood season data accumulates.
 
+_ROLLING_TEST_DAYS = 7
+
+
+def _as_day(value):
+    """Convert datetime64 scalar/array values to date-level datetime64[D]."""
+    return np.asarray(value).astype("datetime64[D]")
+
+
+def _latest_valid_day(dt_arr, y_price_resid):
+    """Latest feature timestamp whose t+96 price target is available."""
+    day_arr = _as_day(dt_arr)
+    valid = ~np.isnan(y_price_resid)
+    if not valid.any():
+        return None
+    return day_arr[valid].max()
+
+
+def _rolling_window(dt_arr, y_price_resid):
+    end_day = _latest_valid_day(dt_arr, y_price_resid)
+    if end_day is None:
+        return None, None
+    start_day = end_day - np.timedelta64(_ROLLING_TEST_DAYS - 1, "D")
+    return start_day, end_day
+
 
 def _build_split_indices(dt_arr, mask, train_start, train_end,
                          val_start, val_end, test_start, test_end,
-                         y_price_resid):
+                         y_price_resid, rolling_start=None,
+                         rolling_end=None):
     """Build Train/Val/Test indices for one season."""
     n = len(dt_arr)
+    day_arr = _as_day(dt_arr)
     train_mask = mask & (dt_arr >= train_start) & (dt_arr <= train_end)
     val_mask   = mask & (dt_arr >= val_start)   & (dt_arr <= val_end)
     test_mask  = mask & (dt_arr >= test_start)  & (dt_arr <= test_end)
     valid = ~np.isnan(y_price_resid) if mask.sum() > 0 else np.zeros(n, dtype=bool)
+
+    if rolling_start is not None and rolling_end is not None:
+        rolling_mask = mask & (day_arr >= rolling_start) & (day_arr <= rolling_end)
+        fixed_test_end_day = _as_day(test_end)
+        dynamic_train_mask = (
+            mask
+            & (day_arr > fixed_test_end_day)
+            & (day_arr < rolling_start)
+        )
+        train_mask = train_mask | dynamic_train_mask
+    else:
+        rolling_mask = np.zeros(n, dtype=bool)
+
+    train_mask = train_mask & ~val_mask & ~test_mask & ~rolling_mask
     idx_train = np.where(train_mask & valid)[0]
     idx_val   = np.where(val_mask & valid)[0]
     idx_test  = np.where(test_mask & valid)[0]
-    return idx_train, idx_val, idx_test
+    idx_rolling_test = np.where(rolling_mask & valid)[0]
+    return idx_train, idx_val, idx_test, idx_rolling_test
 
 
 def save_outputs(result, grid_lag=0):
@@ -73,27 +115,50 @@ def save_outputs(result, grid_lag=0):
     y_price_resid = result['y_price_resid']
     mask_dry = result['dry_mask']
     mask_wet = result['wet_mask']
+    rolling_start, rolling_end = _rolling_window(dt_arr, y_price_resid)
 
-    idx_dry_train, idx_dry_val, idx_dry_test = _build_split_indices(
+    idx_dry_train, idx_dry_val, idx_dry_test, idx_dry_rolling_test = _build_split_indices(
         dt_arr, mask_dry, _DRY_TRAIN_START, _DRY_TRAIN_END,
         _DRY_VAL_START, _DRY_VAL_END, _DRY_TEST_START, _DRY_TEST_END,
-        y_price_resid)
+        y_price_resid, rolling_start, rolling_end)
 
-    idx_wet_train, idx_wet_val, idx_wet_test = _build_split_indices(
+    idx_wet_train, idx_wet_val, idx_wet_test, idx_wet_rolling_test = _build_split_indices(
         dt_arr, mask_wet, _WET_TRAIN_START, _WET_TRAIN_END,
         _WET_VAL_START, _WET_VAL_END, _WET_TEST_START, _WET_TEST_END,
-        y_price_resid)
+        y_price_resid, rolling_start, rolling_end)
+
+    split_info = {
+        'mode': 'fixed_test_plus_rolling_test',
+        'rolling_test_days': _ROLLING_TEST_DAYS,
+        'rolling_start': str(rolling_start) if rolling_start is not None else None,
+        'rolling_end': str(rolling_end) if rolling_end is not None else None,
+        'train_extension': 'after fixed test end and before rolling test start',
+        'fixed_windows': {
+            'dry': {
+                'train': [str(_DRY_TRAIN_START), str(_DRY_TRAIN_END)],
+                'val': [str(_DRY_VAL_START), str(_DRY_VAL_END)],
+                'test': [str(_DRY_TEST_START), str(_DRY_TEST_END)],
+            },
+            'wet': {
+                'train': [str(_WET_TRAIN_START), str(_WET_TRAIN_END)],
+                'val': [str(_WET_VAL_START), str(_WET_VAL_END)],
+                'test': [str(_WET_TEST_START), str(_WET_TEST_END)],
+            },
+        },
+    }
 
     print(f"\n  时期切分:")
     print(f"    枯水: Train={len(idx_dry_train)}, Val={len(idx_dry_val)}, "
-          f"Test={len(idx_dry_test)}")
+          f"Test={len(idx_dry_test)}, RollingTest={len(idx_dry_rolling_test)}")
     print(f"    丰水: Train={len(idx_wet_train)}, Val={len(idx_wet_val)}, "
-          f"Test={len(idx_wet_test)}")
+          f"Test={len(idx_wet_test)}, RollingTest={len(idx_wet_rolling_test)}")
+    if rolling_start is not None:
+        print(f"    滚动测试窗口: {rolling_start} → {rolling_end}")
 
     # Filename suffix for gap-fill variants
     lag_suffix = f"_lag{grid_lag}" if grid_lag > 0 else ""
 
-    def _save_one(suffix, idx_train, idx_val, idx_test):
+    def _save_one(suffix, idx_train, idx_val, idx_test, idx_rolling_test):
         out = {
             'X': result['X'],
             'feat_names': result['feat_names'],
@@ -107,6 +172,8 @@ def save_outputs(result, grid_lag=0):
             'idx_train': idx_train,
             'idx_val': idx_val,
             'idx_test': idx_test,
+            'idx_rolling_test': idx_rolling_test,
+            'split_info': json.dumps(split_info, ensure_ascii=False),
             'dt': result['dt'],
             'period': result['period'],
             'month': result['month'],
@@ -123,8 +190,10 @@ def save_outputs(result, grid_lag=0):
         print(f"  保存: {fp}")
         return fp
 
-    fp_dry = _save_one('dry', idx_dry_train, idx_dry_val, idx_dry_test)
-    fp_wet = _save_one('wet', idx_wet_train, idx_wet_val, idx_wet_test)
+    fp_dry = _save_one('dry', idx_dry_train, idx_dry_val, idx_dry_test,
+                       idx_dry_rolling_test)
+    fp_wet = _save_one('wet', idx_wet_train, idx_wet_val, idx_wet_test,
+                       idx_wet_rolling_test)
     return fp_dry, fp_wet
 
 

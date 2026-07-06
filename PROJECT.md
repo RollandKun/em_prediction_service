@@ -308,11 +308,11 @@ GET /api/v1/predictions?date=2026-06-25
 | 时间 | 任务 | 说明 |
 |------|------|------|
 | 00:55 | `refresh_token` | 刷新电网 API Token |
-| 01:00 | `fetch_grid` | 拉取昨日 96 条电网数据 |
+| 01:00 | `fetch_grid` | 拉取昨日 96 条电网数据，并补拉同日气象实况 |
 | 01:30 | `fetch_weather` | 拉取 NWP 气象预报（4 天） |
 | 02:00 | `daily_inference` | 特征工程 → Stage1 → Stage2 → 写入 predictions 表 |
 | 02:30 | `validate_data` | 校验昨日数据质量（完整性、值域） |
-| 08:00 | `refresh_token_and_fetch` | 早上备份：刷新 Token + 补拉昨日电网数据，并重新推理覆盖预测 |
+| 08:00 | `refresh_token_and_fetch` | 早上备份：刷新 Token + 补拉昨日电网/气象实况，并重新推理覆盖预测 |
 | 每周日 03:00 | `weekly_retrain` | 全量重训练（28 个模型，~4GB 内存） |
 | 每小时 | `hourly_health` | 心跳日志 |
 
@@ -392,10 +392,13 @@ api/main.py::lifespan()
 scheduler::job_weekly_retrain()
   ├── pipeline.train_stage1::train_and_save()
   │     ├── 加载 features_15min_{dry,wet}.npz
+  │     ├── 训练集扩展到固定测试窗口之后、最近 7 天 RollingTest 之前
   │     ├── 每变量每季：XGBoost + TimeSeriesSplit(OOF) → .pkl (含 metadata)
   │     └── 保存 *_oof.npz (供 Stage2 训练)
   └── pipeline.train_stage2::train_and_save()
         ├── 加载 Stage1 OOF + 特征
+        ├── 同时输出固定 Test 指标和 RollingTest 近期指标
+        ├── 若丰水 RollingTest 未明显优于基线，写入 guard_policy
         ├── 枯水：RandomForest 预测 anchor残差
         ├── 丰水：XGBoost 预测残差（v14 统一策略）
         ├── 保存 6 个 .pkl (含 safe_indices)

@@ -55,6 +55,105 @@ REPORT_DIR.mkdir(parents=True, exist_ok=True)
 RANDOM_SEED = 42
 FEAT_DRY = FEAT_DIR / "features_15min_dry.npz"
 FEAT_WET = FEAT_DIR / "features_15min_wet.npz"
+ROLLING_GUARD_MIN_SAMPLES = 96
+ROLLING_GUARD_MIN_IMPROVEMENT = 0.05
+ROLLING_GUARD_BLEND_MODEL_WEIGHT = 0.30
+
+
+def _finite_float(value):
+    return value is not None and np.isfinite(value)
+
+
+def _round_or_none(value, ndigits=2):
+    return round(float(value), ndigits) if _finite_float(value) else None
+
+
+def _apply_guard_policy(price_model, anchor, lag96, policy):
+    """Apply serving-time fallback/blend policy to a price prediction array."""
+    mode = policy.get('mode', 'model') if policy else 'model'
+    if mode == 'model':
+        return price_model.copy()
+
+    if mode == 'lag96':
+        baseline = lag96
+        weight_model = 0.0
+    elif mode == 'blend':
+        baseline_name = policy.get('baseline', 'lag96')
+        baseline = lag96 if baseline_name == 'lag96' else anchor
+        weight_model = float(policy.get('model_weight', ROLLING_GUARD_BLEND_MODEL_WEIGHT))
+    else:
+        return price_model.copy()
+
+    finite_model = np.isfinite(price_model)
+    finite_base = np.isfinite(baseline)
+    guarded = price_model.copy()
+    guarded = np.where(finite_base & finite_model,
+                       weight_model * price_model + (1.0 - weight_model) * baseline,
+                       guarded)
+    guarded = np.where(finite_base & ~finite_model, baseline, guarded)
+    return guarded
+
+
+def _build_guard_policy(season_name, rolling_ev, baseline_rolling):
+    """Choose serving policy from recent rolling performance."""
+    policy = {
+        'enabled': False,
+        'mode': 'model',
+        'reason': 'default_model',
+        'min_samples': ROLLING_GUARD_MIN_SAMPLES,
+        'min_improvement': ROLLING_GUARD_MIN_IMPROVEMENT,
+        'model_weight': ROLLING_GUARD_BLEND_MODEL_WEIGHT,
+    }
+
+    if season_name != 'wet':
+        policy['reason'] = 'only_wet_guarded'
+        return policy
+
+    n = int(rolling_ev.get('n', 0))
+    model_mae = rolling_ev.get('MAE')
+    anchor_mae = baseline_rolling.get('MAE_anchor')
+    lag96_mae = baseline_rolling.get('MAE_lag96')
+
+    policy.update({
+        'n_rolling': n,
+        'model_mae': _round_or_none(model_mae),
+        'anchor_mae': _round_or_none(anchor_mae),
+        'lag96_mae': _round_or_none(lag96_mae),
+    })
+
+    if n < ROLLING_GUARD_MIN_SAMPLES or not _finite_float(model_mae):
+        policy['reason'] = 'insufficient_rolling_test'
+        return policy
+
+    baselines = {
+        'anchor': anchor_mae,
+        'lag96': lag96_mae,
+    }
+    baselines = {k: v for k, v in baselines.items() if _finite_float(v)}
+    if not baselines:
+        policy['reason'] = 'no_valid_baseline'
+        return policy
+
+    best_baseline = min(baselines, key=baselines.get)
+    best_mae = baselines[best_baseline]
+    policy['best_baseline'] = best_baseline
+    policy['best_baseline_mae'] = _round_or_none(best_mae)
+
+    required_mae = best_mae * (1.0 - ROLLING_GUARD_MIN_IMPROVEMENT)
+    policy['required_model_mae'] = _round_or_none(required_mae)
+    if model_mae <= required_mae:
+        policy['reason'] = 'model_beats_recent_baseline'
+        return policy
+
+    policy['enabled'] = True
+    if best_baseline == 'lag96':
+        policy['mode'] = 'lag96'
+        policy['reason'] = 'recent_lag96_baseline_wins'
+    else:
+        policy['mode'] = 'blend'
+        policy['baseline'] = best_baseline
+        policy['reason'] = 'recent_baseline_wins_blend'
+    return policy
 
 
 # ====================================================================
@@ -161,8 +260,16 @@ def load_all_data(grid_lag=0):
     period = data_dry['period']
     idx_dry_train = data_dry['idx_train']; idx_dry_val = data_dry['idx_val']
     idx_dry_test  = data_dry['idx_test']
+    idx_dry_rolling_test = (
+        data_dry['idx_rolling_test'] if 'idx_rolling_test' in data_dry
+        else np.array([], dtype=int)
+    )
     idx_wet_train = data_wet['idx_train']; idx_wet_val = data_wet['idx_val']
     idx_wet_test  = data_wet['idx_test']
+    idx_wet_rolling_test = (
+        data_wet['idx_rolling_test'] if 'idx_rolling_test' in data_wet
+        else np.array([], dtype=int)
+    )
 
     # 过滤 NaN (anchor 前 672 行为 NaN)
     valid_dry = ~np.isnan(X_dry).any(axis=1) & ~np.isnan(anchor)
@@ -170,12 +277,18 @@ def load_all_data(grid_lag=0):
     idx_dry_train = np.intersect1d(idx_dry_train, np.where(valid_dry)[0])
     idx_dry_val   = np.intersect1d(idx_dry_val,   np.where(valid_dry)[0])
     idx_dry_test  = np.intersect1d(idx_dry_test,  np.where(valid_dry)[0])
+    idx_dry_rolling_test = np.intersect1d(idx_dry_rolling_test, np.where(valid_dry)[0])
     idx_wet_train = np.intersect1d(idx_wet_train, np.where(valid_wet)[0])
     idx_wet_val   = np.intersect1d(idx_wet_val,   np.where(valid_wet)[0])
     idx_wet_test  = np.intersect1d(idx_wet_test,  np.where(valid_wet)[0])
+    idx_wet_rolling_test = np.intersect1d(idx_wet_rolling_test, np.where(valid_wet)[0])
 
-    print(f"  枯水 Train/Val/Test: {len(idx_dry_train)}/{len(idx_dry_val)}/{len(idx_dry_test)}")
-    print(f"  丰水 Train/Val/Test: {len(idx_wet_train)}/{len(idx_wet_val)}/{len(idx_wet_test)}")
+    print(f"  枯水 Train/Val/Test/RollingTest: "
+          f"{len(idx_dry_train)}/{len(idx_dry_val)}/{len(idx_dry_test)}/"
+          f"{len(idx_dry_rolling_test)}")
+    print(f"  丰水 Train/Val/Test/RollingTest: "
+          f"{len(idx_wet_train)}/{len(idx_wet_val)}/{len(idx_wet_test)}/"
+          f"{len(idx_wet_rolling_test)}")
 
     return {
         'X_dry': X_dry, 'X_wet': X_wet,
@@ -183,8 +296,10 @@ def load_all_data(grid_lag=0):
         'anchor': anchor, 'lag96': lag96,
         'idx_dry_train': idx_dry_train, 'idx_dry_val': idx_dry_val,
         'idx_dry_test': idx_dry_test,
+        'idx_dry_rolling_test': idx_dry_rolling_test,
         'idx_wet_train': idx_wet_train, 'idx_wet_val': idx_wet_val,
         'idx_wet_test': idx_wet_test,
+        'idx_wet_rolling_test': idx_wet_rolling_test,
         'period': period, 'feat_names': feat_names, 'price_t': price_t,
         'safe_indices': safe_indices, 'safe_names': safe_names,
     }
@@ -278,7 +393,8 @@ def blend_weights(period):
 # ====================================================================
 
 def train_one_season(X, y_abs, anchor, price_lag96,
-                     idx_train, idx_val, idx_test, period, season_name):
+                     idx_train, idx_val, idx_test, idx_rolling_test,
+                     period, season_name):
     """训练一个季节的 3 个时段模型。
 
     枯水 (dry):  RandomForest 预测 price[t+96] - anchor
@@ -290,7 +406,10 @@ def train_one_season(X, y_abs, anchor, price_lag96,
     """
     masks = build_period_masks(period)
     idx_tv = np.concatenate([idx_train, idx_val])
-    n_tv, n_test, n_total = len(idx_tv), len(idx_test), X.shape[0]
+    n_tv = len(idx_tv)
+    n_test = len(idx_test)
+    n_rolling_test = len(idx_rolling_test)
+    n_total = X.shape[0]
     is_dry = (season_name == 'dry')
 
     if is_dry:
@@ -334,7 +453,8 @@ def train_one_season(X, y_abs, anchor, price_lag96,
         if n_sel < 50:
             # 样本不足，跳过
             segments[seg] = {'model': None, 'oof_tv': np.zeros(n_tv),
-                             'oof_test': np.zeros(n_test)}
+                             'oof_test': np.zeros(n_test),
+                             'oof_rolling_test': np.zeros(n_rolling_test)}
             continue
 
         X_sel, y_sel = X_tv[tv_sel], y_tv[tv_sel]
@@ -380,13 +500,22 @@ def train_one_season(X, y_abs, anchor, price_lag96,
         # 全量预测（用于 OOF 拼接）
         oof_tv_full = fm.predict(X_tv)
         oof_test_full = fm.predict(X[idx_test])
+        oof_rolling_test_full = (
+            fm.predict(X[idx_rolling_test]) if n_rolling_test > 0
+            else np.array([])
+        )
         oof_tv_final = oof_tv_full.copy()
         # 用 fold OOF 替换对应位置
         for i, loc in enumerate(tv_sel):
             if not np.isnan(oof_sel[i]):
                 oof_tv_final[loc] = oof_sel[i]
 
-        segments[seg] = {'model': fm, 'oof_tv': oof_tv_final, 'oof_test': oof_test_full}
+        segments[seg] = {
+            'model': fm,
+            'oof_tv': oof_tv_final,
+            'oof_test': oof_test_full,
+            'oof_rolling_test': oof_rolling_test_full,
+        }
         print(f"    OOF覆盖: {np.sum(~np.isnan(oof_tv_final))}/{n_tv}")
 
     # ── 软融合 ──
@@ -402,6 +531,11 @@ def train_one_season(X, y_abs, anchor, price_lag96,
         oof_full[gi] = (w[0] * segments['valley']['oof_test'][i] +
                         w[1] * segments['peak']['oof_test'][i] +
                         w[2] * segments['base']['oof_test'][i])
+    for i, gi in enumerate(idx_rolling_test):
+        w = weights[gi]
+        oof_full[gi] = (w[0] * segments['valley']['oof_rolling_test'][i] +
+                        w[1] * segments['peak']['oof_rolling_test'][i] +
+                        w[2] * segments['base']['oof_rolling_test'][i])
     oof_full[np.isnan(oof_full)] = 0.0
 
     # 最终价格：残差 + anchor（枯水和丰水统一策略）
@@ -409,38 +543,72 @@ def train_one_season(X, y_abs, anchor, price_lag96,
     resid_pred = oof_full
 
     # ── 评估 ──
-    def evaluate(idx, label):
-        valid = np.isin(idx, np.where(~np.isnan(price_pred))[0])
+    def evaluate(idx, label, pred=None, emit=True):
+        pred = price_pred if pred is None else pred
+        valid = np.isfinite(pred[idx]) & np.isfinite(y_abs[idx])
         ei = idx[valid]
         if len(ei) == 0:
             return {'R2': np.nan, 'MAE': np.nan, 'n': 0, 'seg_mae': {}}
-        yt = y_abs[ei]; yp = price_pred[ei]
+        yt = y_abs[ei]; yp = pred[ei]
         r2 = r2_score(yt, yp); mae = mean_absolute_error(yt, yp)
         seg_mae = {}
         for sg in ['valley', 'peak', 'base']:
             sm = masks[f'{sg}_infer'][ei]
             seg_mae[sg] = mean_absolute_error(yt[sm], yp[sm]) if sm.sum() > 0 else np.nan
-        print(f"  {label}: R2={r2:.4f}, MAE_price={mae:.2f}, n={len(ei)}")
-        print(f"    午谷={seg_mae['valley']:.2f}  晚峰={seg_mae['peak']:.2f}  基荷={seg_mae['base']:.2f}")
+        if emit:
+            print(f"  {label}: R2={r2:.4f}, MAE_price={mae:.2f}, n={len(ei)}")
+            print(f"    午谷={seg_mae['valley']:.2f}  晚峰={seg_mae['peak']:.2f}  基荷={seg_mae['base']:.2f}")
         return {'R2': r2, 'MAE': mae, 'n': len(ei), 'seg_mae': seg_mae}
 
     tr_ev = evaluate(idx_train, 'Train')
     va_ev = evaluate(idx_val,   'Val')
     te_ev = evaluate(idx_test,  'Test')
+    roll_ev = evaluate(idx_rolling_test, 'RollingTest')
 
     # 基线
-    bl_v = ~np.isnan(y_abs[idx_test]) & ~np.isnan(price_pred[idx_test])
-    bl_t = y_abs[idx_test][bl_v]
-    bl_mae_anchor = mean_absolute_error(bl_t, anchor[idx_test][bl_v])
-    bl_mae_lag96  = mean_absolute_error(bl_t, price_lag96[idx_test][bl_v])
-    print(f"  基线 anchor(昨周均值): MAE={bl_mae_anchor:.2f}")
-    print(f"  基线 lag96:            MAE={bl_mae_lag96:.2f}")
+    def baseline(idx):
+        if len(idx) == 0:
+            return {'MAE_anchor': np.nan, 'MAE_lag96': np.nan}
+        valid = (~np.isnan(y_abs[idx]) & ~np.isnan(anchor[idx])
+                 & ~np.isnan(price_lag96[idx]))
+        if valid.sum() == 0:
+            return {'MAE_anchor': np.nan, 'MAE_lag96': np.nan}
+        yt = y_abs[idx][valid]
+        return {
+            'MAE_anchor': mean_absolute_error(yt, anchor[idx][valid]),
+            'MAE_lag96': mean_absolute_error(yt, price_lag96[idx][valid]),
+        }
+
+    bl_fixed = baseline(idx_test)
+    bl_rolling = baseline(idx_rolling_test)
+    print(f"  固定Test基线 anchor(昨周均值): MAE={bl_fixed['MAE_anchor']:.2f}")
+    print(f"  固定Test基线 lag96:            MAE={bl_fixed['MAE_lag96']:.2f}")
+    print(f"  RollingTest基线 anchor:        MAE={bl_rolling['MAE_anchor']:.2f}")
+    print(f"  RollingTest基线 lag96:         MAE={bl_rolling['MAE_lag96']:.2f}")
+
+    guard_policy = _build_guard_policy(season_name, roll_ev, bl_rolling)
+    price_pred_serving = _apply_guard_policy(price_pred, anchor, price_lag96, guard_policy)
+    resid_pred_serving = price_pred_serving - anchor
+    guarded_roll_ev = evaluate(idx_rolling_test, 'RollingTestGuarded',
+                               pred=price_pred_serving, emit=False)
+    if guard_policy.get('enabled'):
+        print(f"  近期保护策略: {guard_policy['mode']} "
+              f"({guard_policy.get('reason')})")
+        if guarded_roll_ev['n'] > 0:
+            print(f"  RollingTestGuarded: R2={guarded_roll_ev['R2']:.4f}, "
+                  f"MAE_price={guarded_roll_ev['MAE']:.2f}, "
+                  f"n={guarded_roll_ev['n']}")
 
     return {
         'price_pred': price_pred, 'resid_pred': resid_pred,
+        'price_pred_serving': price_pred_serving,
+        'resid_pred_serving': resid_pred_serving,
         'segments': segments, 'masks': masks,
         'train': tr_ev, 'val': va_ev, 'test': te_ev,
-        'baseline': {'MAE_anchor': bl_mae_anchor, 'MAE_lag96': bl_mae_lag96},
+        'rolling_test': roll_ev, 'rolling_test_guarded': guarded_roll_ev,
+        'baseline': bl_fixed,
+        'baseline_rolling': bl_rolling,
+        'guard_policy': guard_policy,
     }
 
 
@@ -467,17 +635,20 @@ def train_and_save(skip_versioning: bool = False, grid_lag: int = 0):
 
     # ── 逐季训练 ──
     results = {}
-    for sn, Xk, yk, ak, lk, trk, vlk, tek in [
+    for sn, Xk, yk, ak, lk, trk, vlk, tek, rtk in [
         ('dry', 'X_dry', 'y_dry', 'anchor', 'lag96',
-         'idx_dry_train', 'idx_dry_val', 'idx_dry_test'),
+         'idx_dry_train', 'idx_dry_val', 'idx_dry_test',
+         'idx_dry_rolling_test'),
         ('wet', 'X_wet', 'y_wet', 'anchor', 'lag96',
-         'idx_wet_train', 'idx_wet_val', 'idx_wet_test'),
+         'idx_wet_train', 'idx_wet_val', 'idx_wet_test',
+         'idx_wet_rolling_test'),
     ]:
         print(f"\n{'#' * 60}")
         print(f"# {sn.upper()} SEASON")
         print(f"{'#' * 60}")
         results[sn] = train_one_season(
-            d[Xk], d[yk], d[ak], d[lk], d[trk], d[vlk], d[tek], d['period'], sn,
+            d[Xk], d[yk], d[ak], d[lk], d[trk], d[vlk], d[tek], d[rtk],
+            d['period'], sn,
         )
 
     # ── 合并枯/丰水 OOF → 全量价格预测 ──
@@ -493,10 +664,10 @@ def train_and_save(skip_versioning: bool = False, grid_lag: int = 0):
 
     price_pred_all = np.full(n_total, np.nan)
     resid_pred_all = np.full(n_total, np.nan)
-    price_pred_all[dmask] = results['dry']['price_pred'][dmask]
-    price_pred_all[wmask] = results['wet']['price_pred'][wmask]
-    resid_pred_all[dmask] = results['dry']['resid_pred'][dmask]
-    resid_pred_all[wmask] = results['wet']['resid_pred'][wmask]
+    price_pred_all[dmask] = results['dry']['price_pred_serving'][dmask]
+    price_pred_all[wmask] = results['wet']['price_pred_serving'][wmask]
+    resid_pred_all[dmask] = results['dry']['resid_pred_serving'][dmask]
+    resid_pred_all[wmask] = results['wet']['resid_pred_serving'][wmask]
 
     np.savez(
         FEAT_DIR / f'price_oof{lag_suffix}.npz',
@@ -521,6 +692,7 @@ def train_and_save(skip_versioning: bool = False, grid_lag: int = 0):
                         'feat_names': d['feat_names'],
                         'safe_indices': d['safe_indices'],
                         'safe_names': d['safe_names'],
+                        'guard_policy': results[sn]['guard_policy'],
                     }, f)
                 models_saved.append(str(path))
                 print(f"  [OK] {path.name}")
@@ -541,8 +713,13 @@ def train_and_save(skip_versioning: bool = False, grid_lag: int = 0):
     for sn, label in [('dry', '枯水期'), ('wet', '丰水期')]:
         r = results[sn]
         print(f"\n  {label}:")
-        print(f"    Test R2  = {r['test']['R2']:.4f}")
-        print(f"    Test MAE = {r['test']['MAE']:.2f} 元/MWh")
+        print(f"    固定Test R2  = {r['test']['R2']:.4f}")
+        print(f"    固定Test MAE = {r['test']['MAE']:.2f} 元/MWh")
+        print(f"    RollingTest R2  = {r['rolling_test']['R2']:.4f}")
+        print(f"    RollingTest MAE = {r['rolling_test']['MAE']:.2f} 元/MWh")
+        print(f"    RollingTest Guarded MAE = {r['rolling_test_guarded']['MAE']:.2f} 元/MWh")
+        print(f"    推理保护策略 = {r['guard_policy'].get('mode')}"
+              f" ({r['guard_policy'].get('reason')})")
         print(f"    基线 anchor = {r['baseline']['MAE_anchor']:.2f}")
         print(f"    基线 lag96  = {r['baseline']['MAE_lag96']:.2f}")
 
@@ -563,15 +740,34 @@ def _write_report(results: dict, output_dir: Path):
     for sn, st in [('dry', '枯水期'), ('wet', '丰水期')]:
         r = results[sn]
         lines.append(f"## {st}\n")
-        lines.append("| 指标 | Train | Val | Test | anchor基线 | lag96基线 |")
-        lines.append("|---|---|---|---|---|---|")
-        tr = r['train']; va = r['val']; te = r['test']; bl = r['baseline']
-        lines.append(f"| R² | {tr['R2']:.4f} | {va['R2']:.4f} | {te['R2']:.4f} | — | — |")
         lines.append(
-            f"| MAE_price | {tr['MAE']:.2f} | {va['MAE']:.2f} | {te['MAE']:.2f} "
-            f"| {bl['MAE_anchor']:.2f} | {bl['MAE_lag96']:.2f} |"
+            "| 指标 | Train | Val | 固定Test | RollingTest(raw) | "
+            "RollingTest(serving) | 固定anchor基线 | 固定lag96基线 | "
+            "Rolling anchor基线 | Rolling lag96基线 |"
         )
-        lines.append(f"| n | {tr['n']} | {va['n']} | {te['n']} | — | — |\n")
+        lines.append("|---|---|---|---|---|---|---|---|---|---|")
+        tr = r['train']; va = r['val']; te = r['test']
+        roll = r['rolling_test']; roll_g = r['rolling_test_guarded']
+        bl = r['baseline']; bl_roll = r['baseline_rolling']
+        lines.append(
+            f"| R² | {tr['R2']:.4f} | {va['R2']:.4f} | {te['R2']:.4f} | "
+            f"{roll['R2']:.4f} | {roll_g['R2']:.4f} | — | — | — | — |"
+        )
+        lines.append(
+            f"| MAE_price | {tr['MAE']:.2f} | {va['MAE']:.2f} | {te['MAE']:.2f} | "
+            f"{roll['MAE']:.2f} | {roll_g['MAE']:.2f} | {bl['MAE_anchor']:.2f} | "
+            f"{bl['MAE_lag96']:.2f} | {bl_roll['MAE_anchor']:.2f} | "
+            f"{bl_roll['MAE_lag96']:.2f} |"
+        )
+        lines.append(
+            f"| n | {tr['n']} | {va['n']} | {te['n']} | {roll['n']} | "
+            f"{roll_g['n']} | — | — | — | — |\n"
+        )
+        gp = r['guard_policy']
+        lines.append(
+            f"推理保护策略: `{gp.get('mode')}`，原因: `{gp.get('reason')}`，"
+            f"enabled={gp.get('enabled')}。\n"
+        )
     lines.append(f"\n> 训练时间: {datetime.now().isoformat()}\n")
 
     with open(REPORT_DIR / 'price_stage2_report.md', 'w', encoding='utf-8') as f:
@@ -602,13 +798,27 @@ def _write_model_versions(results: dict):
                     version_name = f"stage2_{season}_{seg}_{version_tag}"
                     model_type = f"stage2_price_{seg}"
                     metrics = {
-                        'R2_test': round(r['test']['R2'], 4),
-                        'MAE_test': round(r['test']['MAE'], 2),
+                        'R2_test': _round_or_none(r['test']['R2'], 4),
+                        'MAE_test': _round_or_none(r['test']['MAE'], 2),
+                        'R2_rolling_test': _round_or_none(r['rolling_test']['R2'], 4),
+                        'MAE_rolling_test': _round_or_none(r['rolling_test']['MAE'], 2),
+                        'R2_rolling_test_guarded': _round_or_none(
+                            r['rolling_test_guarded']['R2'], 4),
+                        'MAE_rolling_test_guarded': _round_or_none(
+                            r['rolling_test_guarded']['MAE'], 2),
                         'seg_mae_test': {k: round(v, 2) if not np.isnan(v) else None
                                         for k, v in r['test'].get('seg_mae', {}).items()},
-                        'baseline_MAE_anchor': round(r['baseline']['MAE_anchor'], 2),
-                        'baseline_MAE_lag96': round(r['baseline']['MAE_lag96'], 2),
+                        'baseline_MAE_anchor': _round_or_none(
+                            r['baseline']['MAE_anchor'], 2),
+                        'baseline_MAE_lag96': _round_or_none(
+                            r['baseline']['MAE_lag96'], 2),
+                        'baseline_rolling_MAE_anchor': _round_or_none(
+                            r['baseline_rolling']['MAE_anchor'], 2),
+                        'baseline_rolling_MAE_lag96': _round_or_none(
+                            r['baseline_rolling']['MAE_lag96'], 2),
                         'n_test': r['test']['n'],
+                        'n_rolling_test': r['rolling_test']['n'],
+                        'guard_policy': r['guard_policy'],
                     }
 
                     conn.execute(

@@ -161,6 +161,10 @@ python -m pipeline.train_stage2 --grid-lag 192 --no-versioning
 # 共 28 个模型 (14 Normal + 14 Lag_192)
 ```
 
+训练切分策略：固定 Test 窗口保留用于横向对比；每次重新生成特征时，训练集会纳入固定测试窗口之后、最近 7 天滚动测试窗口之前的新数据；最近 7 个有标签日期作为 RollingTest，用于观察近期表现。
+
+推理保护策略：Stage2 重训后会比较丰水期 RollingTest 上模型、anchor 和 lag96 的 MAE。若模型没有至少优于最佳基线 5%，模型文件会写入 `guard_policy`；线上推理读取该策略，优先采用 lag96，或对最佳基线与模型做加权融合，避免近期表现弱于简单基线时仍强行使用复杂模型。
+
 ### 6. 导出基础表
 
 ```bash
@@ -263,11 +267,11 @@ Docker Compose 启动后访问 `http://localhost:8100/docs` 查看 Swagger UI。
 | 任务 | Cron | 说明 |
 |---|---|---|
 | `refresh_token` | `55 0 * * *` | 刷新电网 API Token |
-| `fetch_grid` | `0 1 * * *` | 拉取昨日电网数据 |
+| `fetch_grid` | `0 1 * * *` | 拉取昨日电网数据，并补拉同日气象实况 → weather_obs |
 | `fetch_weather` | `30 1 * * *` | 拉取 NWP 气象预报 → weather_forecast |
 | `daily_inference` | `0 2 * * *` | 特征 + 推理 → predictions 表 |
 | `validate_data` | `30 2 * * *` | 校验数据质量 → data_quality_log |
-| `refresh_token_and_fetch` | `0 8 * * *` | 08:00 补拉电网数据并重新推理覆盖预测（备份） |
+| `refresh_token_and_fetch` | `0 8 * * *` | 08:00 补拉电网/气象实况，并重新推理覆盖预测（备份） |
 | `weekly_retrain` | `0 3 * * 0` | 全量重训练（Stage1 + Stage2） |
 | `hourly_health` | `0 * * * *` | 心跳日志 |
 

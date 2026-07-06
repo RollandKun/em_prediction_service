@@ -214,7 +214,13 @@ with valid features from grid[t-192] → predicts 2 extra days.
 | Months | 1, 2, 3, 4 | 5, 6 |
 | Train | Jan 2 – Mar 15 | May 1 – May 20 |
 | Val | Mar 16 – Apr 7 | May 21 – May 28 |
-| Test | Apr 8 – Apr 30 | May 29 – Jun 6 |
+| Fixed Test | Apr 8 – Apr 30 | May 29 – Jun 6 |
+| Rolling Test | Latest 7 valid days, held out from training | Latest 7 valid days, held out from training |
+
+Weekly retraining keeps the fixed test windows for longitudinal comparison.
+The training set is expanded with newly available data after the fixed test
+window, stopping before the rolling test window so recent performance remains
+a true holdout.
 
 ### Stage1 Prediction Strategies (v11 mixed anchors)
 
@@ -277,7 +283,7 @@ with valid features from grid[t-192] → predicts 2 extra days.
 - **Inference**: `pipeline/inference.py`
 - **API**: `api/main.py` (FastAPI, 8 endpoints)
 - **Scheduler**: `scheduler/main.py` (APScheduler, 8 jobs)
-- **Production schedule**: daily inference at 02:00 CST; backup grid fetch + inference overwrite at 08:00 CST; weekly retrain Sunday 03:00 CST
+- **Production schedule**: daily inference at 02:00 CST; grid fetch also backfills same-day weather_obs; backup grid/weather_obs fetch + inference overwrite at 08:00 CST; weekly retrain Sunday 03:00 CST
 - **Base table export**: `export_base_table.py`
 - **Models (28 .pkl)**: `models/` (14 Normal + 14 Lag_192)
 - **Feature npz**: `pipeline/output/features_15min_{dry,wet}.npz`

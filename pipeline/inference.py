@@ -298,6 +298,43 @@ def price_anchor_from_lags(price, lags=(96, 672)):
     return anchor, lag96, lag672
 
 
+def _stage2_guard_policy(models, season):
+    """Read serving fallback/blend policy from Stage2 model metadata."""
+    for seg in ['valley', 'peak', 'base']:
+        info = models.get(f"{seg}_{season}")
+        if isinstance(info, dict) and isinstance(info.get('guard_policy'), dict):
+            return info['guard_policy']
+    return {'enabled': False, 'mode': 'model', 'reason': 'no_guard_policy'}
+
+
+def _apply_stage2_guard(price_model, anchor, lag96, policy):
+    """Apply recent-performance guard to a season prediction slice."""
+    mode = policy.get('mode', 'model') if policy else 'model'
+    if not policy or not policy.get('enabled') or mode == 'model':
+        return price_model.copy()
+
+    if mode == 'lag96':
+        baseline = lag96
+        model_weight = 0.0
+    elif mode == 'blend':
+        baseline_name = policy.get('baseline', 'lag96')
+        baseline = lag96 if baseline_name == 'lag96' else anchor
+        model_weight = float(policy.get('model_weight', 0.30))
+    else:
+        return price_model.copy()
+
+    finite_model = np.isfinite(price_model)
+    finite_base = np.isfinite(baseline)
+    guarded = price_model.copy()
+    guarded = np.where(
+        finite_model & finite_base,
+        model_weight * price_model + (1.0 - model_weight) * baseline,
+        guarded,
+    )
+    guarded = np.where(~finite_model & finite_base, baseline, guarded)
+    return guarded
+
+
 # ====================================================================
 # Main prediction
 # ====================================================================
@@ -400,8 +437,16 @@ def run_inference(grid_lag=0):
                    w[:, 2] * seg_preds['base'])
 
         # Both seasons use residual strategy: price = anchor + resid
-        resid_pred[idx] = blended
-        price_pred[idx] = anchor[idx] + blended
+        raw_price = anchor[idx] + blended
+        guard_policy = _stage2_guard_policy(m2, season)
+        guarded_price = _apply_stage2_guard(raw_price, anchor[idx], lag96[idx],
+                                            guard_policy)
+        price_pred[idx] = guarded_price
+        resid_pred[idx] = guarded_price - anchor[idx]
+
+        if guard_policy.get('enabled'):
+            logger.info(f"  S2 {season}: guard={guard_policy.get('mode')} "
+                        f"reason={guard_policy.get('reason')}")
 
         # Per-season summary
         valid_p = ~np.isnan(price_pred[idx])

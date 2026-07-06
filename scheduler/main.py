@@ -7,11 +7,11 @@ scheduler/main.py — 定时任务调度器（Phase 4）
 
 定时任务清单（北京时间 CST）：
   refresh_token            55 0 * * *    每日 00:55 刷新 API Token
-  fetch_grid               0 1 * * *     每日 01:00 拉取昨日电网数据
+  fetch_grid               0 1 * * *     每日 01:00 拉取昨日电网数据 + 同日气象实况
   fetch_weather            30 1 * * *    每日 01:30 拉取今日 NWP 气象预报
   daily_inference          0 2 * * *     每日 02:00 执行推理 → predictions 表（9点前出第二天预测）
   validate_data            30 2 * * *    每日 02:30 校验昨日数据质量
-  refresh_token_and_fetch  0 8 * * *     每日 08:00 刷新 Token + 补拉电网数据（备份）
+  refresh_token_and_fetch  0 8 * * *     每日 08:00 刷新 Token + 补拉电网/气象实况（备份）
   weekly_retrain           0 3 * * 0     每周日 03:00 全量重训练
   hourly_health            0 * * * *     每小时健康心跳
 
@@ -67,6 +67,25 @@ def _yesterday_shanghai() -> date:
     return _today_shanghai() - timedelta(days=1)
 
 
+def _fetch_weather_obs_for_date(target_date: date) -> dict:
+    """Best-effort fetch of historical weather observations for a business day."""
+    start = time.time()
+    try:
+        from ingestion.weather_fetcher import fetch_weather_obs
+        logger.info(f"  [weather_obs] 拉取气象实况: {target_date.isoformat()}")
+        n = fetch_weather_obs(target_date=target_date)
+        elapsed = time.time() - start
+        logger.info(f"  [weather_obs] 完成 — {n} 条 ({elapsed:.1f}s)")
+        return {'ok': True, 'records': n, 'date': target_date.isoformat(),
+                'elapsed': round(elapsed, 1)}
+    except Exception as e:
+        elapsed = time.time() - start
+        logger.warning(f"  [weather_obs] 拉取失败（不阻断电网/推理）— {e}",
+                       exc_info=True)
+        return {'ok': False, 'error': str(e), 'date': target_date.isoformat(),
+                'elapsed': round(elapsed, 1)}
+
+
 # ====================================================================
 # 任务函数定义（每个任务 = 一个独立可调用的函数，返回 dict 结果）
 # ====================================================================
@@ -92,7 +111,7 @@ def job_fetch_weather() -> dict:
 
 
 def job_fetch_grid() -> dict:
-    """拉取昨日电网数据 → grid_data 表。
+    """拉取昨日电网数据 → grid_data 表，并补拉同日气象实况 → weather_obs 表。
 
     每日 09:05 执行：此时前一日 96 条 15 分钟数据应已发布到电网平台。
     Token 从 grid_token.txt 读取，过期时自动重新登录。
@@ -104,9 +123,12 @@ def job_fetch_grid() -> dict:
         from ingestion.grid_fetcher import fetch_grid_data
         yesterday = _yesterday_shanghai()
         n = fetch_grid_data(target_date=yesterday)
+        weather_obs = _fetch_weather_obs_for_date(yesterday)
         elapsed = time.time() - start
-        logger.info(f"JOB: fetch_grid 完成 — {n} 条 ({elapsed:.1f}s)")
-        return {'ok': True, 'records': n, 'date': yesterday.isoformat(), 'elapsed': round(elapsed, 1)}
+        logger.info(f"JOB: fetch_grid 完成 — 电网{n}条, "
+                    f"weather_obs_ok={weather_obs.get('ok')} ({elapsed:.1f}s)")
+        return {'ok': True, 'records': n, 'date': yesterday.isoformat(),
+                'weather_obs': weather_obs, 'elapsed': round(elapsed, 1)}
     except Exception as e:
         elapsed = time.time() - start
         logger.error(f"JOB: fetch_grid 失败 — {e}", exc_info=True)
@@ -134,7 +156,7 @@ def job_refresh_token() -> dict:
 
 
 def job_refresh_token_and_fetch() -> dict:
-    """每日 08:00：重新登录获取新 token → 拉取昨日电网数据（备份）。
+    """每日 08:00：重新登录获取新 token → 补拉昨日电网数据/气象实况。
 
     即使凌晨 01:00 那次 fetch_grid 失败，早上也能补上。
     """
@@ -152,12 +174,15 @@ def job_refresh_token_and_fetch() -> dict:
         from ingestion.grid_fetcher import fetch_grid_data
         yesterday = _yesterday_shanghai()
         n = fetch_grid_data(target_date=yesterday)
+        weather_obs = _fetch_weather_obs_for_date(yesterday)
         infer_result = job_daily_inference()
         elapsed = time.time() - start
         logger.info(f"JOB: refresh_token_and_fetch 完成 — Token已刷新, 数据{n}条, "
+                    f"weather_obs_ok={weather_obs.get('ok')}, "
                     f"inference_ok={infer_result.get('ok')} ({elapsed:.1f}s)")
         return {'ok': True, 'records': n, 'date': yesterday.isoformat(),
-                'inference': infer_result, 'elapsed': round(elapsed, 1)}
+                'weather_obs': weather_obs, 'inference': infer_result,
+                'elapsed': round(elapsed, 1)}
     except Exception as e:
         elapsed = time.time() - start
         logger.error(f"JOB: refresh_token_and_fetch 失败 — {e}", exc_info=True)
@@ -215,6 +240,7 @@ def job_daily_inference() -> dict:
             load_stage1_models, load_stage2_models,
             predict_stage1, build_stage2_features, blend_weights,
             season_masks_for_inference, price_anchor_from_lags,
+            _stage2_guard_policy, _apply_stage2_guard,
         )
 
         dry_mask, wet_mask = season_masks_for_inference(dry_mask, wet_mask, dt_arr)
@@ -246,7 +272,7 @@ def job_daily_inference() -> dict:
         X_s2 = build_stage2_features(X, fnames, oof_s, oof_h, oof_w, oof_l,
                                       period, safe_indices=safe_idx)
 
-        anchor, _, _ = price_anchor_from_lags(price)
+        anchor, lag96, _ = price_anchor_from_lags(price)
 
         price_pred = np.full(n, np.nan)
         for season, mask in [('dry', dry_mask), ('wet', wet_mask)]:
@@ -265,7 +291,13 @@ def job_daily_inference() -> dict:
             blended = (w[:, 0] * seg_preds['valley'] +
                        w[:, 1] * seg_preds['peak'] +
                        w[:, 2] * seg_preds['base'])
-            price_pred[idx] = anchor[idx] + blended  # residual + anchor
+            raw_price = anchor[idx] + blended
+            guard_policy = _stage2_guard_policy(m2, season)
+            price_pred[idx] = _apply_stage2_guard(raw_price, anchor[idx], lag96[idx],
+                                                  guard_policy)
+            if guard_policy.get('enabled'):
+                logger.info(f"  S2 {season}: guard={guard_policy.get('mode')} "
+                            f"reason={guard_policy.get('reason')}")
 
         nan_price = np.isnan(price_pred).sum()
         if nan_price > 0:
@@ -371,7 +403,7 @@ def job_daily_inference() -> dict:
                                                  oof_w_lag, oof_l_lag, period_lag,
                                                  safe_indices=safe_idx_lag)
 
-                anchor_l, _, _ = price_anchor_from_lags(price_lag, lags=(192, 672))
+                anchor_l, lag96_l, _ = price_anchor_from_lags(price_lag, lags=(192, 672))
 
                 price_pred_lag = np.full(n_lag, np.nan)
                 for season, mask in [('dry', dry_lag), ('wet', wet_lag)]:
@@ -388,9 +420,16 @@ def job_daily_inference() -> dict:
                             seg_preds_l[seg] = np.zeros(len(idx))
                     w_l = blend_weights(period_lag[idx])
                     blended_l = (w_l[:, 0] * seg_preds_l['valley'] +
-                                w_l[:, 1] * seg_preds_l['peak'] +
-                                w_l[:, 2] * seg_preds_l['base'])
-                    price_pred_lag[idx] = anchor_l[idx] + blended_l  # residual + anchor
+                                 w_l[:, 1] * seg_preds_l['peak'] +
+                                 w_l[:, 2] * seg_preds_l['base'])
+                    raw_price_l = anchor_l[idx] + blended_l
+                    guard_policy_l = _stage2_guard_policy(m2_lag, season)
+                    price_pred_lag[idx] = _apply_stage2_guard(
+                        raw_price_l, anchor_l[idx], lag96_l[idx], guard_policy_l)
+                    if guard_policy_l.get('enabled'):
+                        logger.info(f"  S2 lag192 {season}: "
+                                    f"guard={guard_policy_l.get('mode')} "
+                                    f"reason={guard_policy_l.get('reason')}")
 
                 nan_price_l = np.isnan(price_pred_lag).sum()
                 if nan_price_l > 0:
@@ -506,15 +545,34 @@ def job_weekly_retrain() -> dict:
     logger.info("JOB: weekly_retrain — 全量重训练")
     start = time.time()
     try:
-        # Stage1（4 变量 × 枯/丰 = 8 模型）
-        logger.info("  [retrain] Stage1: solar/hydro/wind/load × dry/wet")
+        logger.info("  [retrain] 重新构建训练特征矩阵")
+        from pipeline.data_loader import load_from_db
+        from pipeline.feature_engine import build_features
+        from pipeline.output import save_outputs
+
+        (dt_arr, df, solar, wind, hydro, load, price,
+         bidspace, reserve, nonmarket, tieline, load_tie) = load_from_db()
+        result = build_features(dt_arr, df, solar, wind, hydro, load, price,
+                                bidspace, reserve, nonmarket, tieline, load_tie)
+        save_outputs(result)
+        result_lag = build_features(dt_arr, df, solar, wind, hydro, load, price,
+                                    bidspace, reserve, nonmarket, tieline,
+                                    load_tie, grid_lag=192)
+        save_outputs(result_lag, grid_lag=192)
+
+        # Stage1（4 变量 × 枯/丰 × Normal/Lag_192 = 16 模型）
+        logger.info("  [retrain] Stage1 Normal: solar/hydro/wind/load × dry/wet")
         from pipeline.train_stage1 import train_and_save
         train_and_save()
+        logger.info("  [retrain] Stage1 Lag_192: solar/hydro/wind/load × dry/wet")
+        train_and_save(grid_lag=192)
 
-        # Stage2（3 时段 × 枯/丰 = 6 模型）
-        logger.info("  [retrain] Stage2: valley/peak/base × dry/wet")
+        # Stage2（3 时段 × 枯/丰 × Normal/Lag_192 = 12 模型）
+        logger.info("  [retrain] Stage2 Normal: valley/peak/base × dry/wet")
         from pipeline.train_stage2 import train_and_save as train_stage2
         train_stage2()
+        logger.info("  [retrain] Stage2 Lag_192: valley/peak/base × dry/wet")
+        train_stage2(grid_lag=192)
 
         elapsed = time.time() - start
         logger.info(f"JOB: weekly_retrain 完成 ({elapsed:.1f}s)")
@@ -687,7 +745,7 @@ def run_once(job_name: str = None):
         result = JOB_REGISTRY[job_name]()
         logger.info(f"  结果: {result}")
     else:
-        # 按依赖顺序执行：天气预报 → 电网数据 → 推理 → 校验
+        # 按依赖顺序执行：Token → 电网+气象实况 → 天气预报 → 推理 → 校验
         ordered = ['refresh_token', 'fetch_grid', 'fetch_weather', 'daily_inference', 'validate_data']
         results = {}
         for name in ordered:

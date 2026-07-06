@@ -155,8 +155,8 @@ def _generate_charts(chart_data, data_dry, data_wet):
         "# Stage1 训练报告",
         f"\n生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
         "\n## 指标汇总\n",
-        "| 变量 | 季节 | 策略 | Test R² | Test MAE (MW) |",
-        "|------|------|------|---------|--------------|",
+        "| 变量 | 季节 | 策略 | 固定Test R² | 固定Test MAE (MW) | RollingTest R² | RollingTest MAE (MW) |",
+        "|------|------|------|-------------|-------------------|----------------|----------------------|",
     ]
 
     for var_name in ['solar', 'hydro', 'wind', 'load']:
@@ -239,7 +239,12 @@ def _generate_charts(chart_data, data_dry, data_wet):
             # Report row
             r2_txt = f"{d['r2']:.4f}" if not np.isnan(d['r2']) else "N/A"
             mae_txt = f"{d['mae']:.1f}" if not np.isnan(d['mae']) else "N/A"
-            report_lines.append(f"| {var_label} | {season_label} | {d['strategy']} | {r2_txt} | {mae_txt} |")
+            roll_r2_txt = f"{d['rolling_r2']:.4f}" if not np.isnan(d['rolling_r2']) else "N/A"
+            roll_mae_txt = f"{d['rolling_mae']:.1f}" if not np.isnan(d['rolling_mae']) else "N/A"
+            report_lines.append(
+                f"| {var_label} | {season_label} | {d['strategy']} | "
+                f"{r2_txt} | {mae_txt} | {roll_r2_txt} | {roll_mae_txt} |"
+            )
 
         plt.tight_layout()
         fp = CHART_DIR / f"stage1_{var_name}_evaluation.png"
@@ -328,9 +333,11 @@ def train_and_save(grid_lag=0):
     idx_dry_train = data_dry['idx_train']
     idx_dry_val   = data_dry['idx_val']
     idx_dry_test  = data_dry['idx_test']
+    idx_dry_rolling_test = data_dry['idx_rolling_test'] if 'idx_rolling_test' in data_dry else np.array([], dtype=int)
     idx_wet_train = data_wet['idx_train']
     idx_wet_val   = data_wet['idx_val']
     idx_wet_test  = data_wet['idx_test']
+    idx_wet_rolling_test = data_wet['idx_rolling_test'] if 'idx_rolling_test' in data_wet else np.array([], dtype=int)
 
     TARGET_MAP = {'solar': 'y_solar', 'hydro': 'y_hydro', 'wind': 'y_wind'}
 
@@ -361,9 +368,11 @@ def train_and_save(grid_lag=0):
         X_dry = X_full_dry[:, fidx]
         X_wet = X_full_wet[:, fidx]
 
-        for season, X_season, idx_tr, idx_vl, idx_te, data_season in [
-            ('dry', X_dry, idx_dry_train, idx_dry_val, idx_dry_test, data_dry),
-            ('wet', X_wet, idx_wet_train, idx_wet_val, idx_wet_test, data_wet),
+        for season, X_season, idx_tr, idx_vl, idx_te, idx_roll, data_season in [
+            ('dry', X_dry, idx_dry_train, idx_dry_val, idx_dry_test,
+             idx_dry_rolling_test, data_dry),
+            ('wet', X_wet, idx_wet_train, idx_wet_val, idx_wet_test,
+             idx_wet_rolling_test, data_wet),
         ]:
             # For load, target is y_price_resid from features (we don't have y_load)
             # We need to extract load from features. Let's get B_load[t] from X_full.
@@ -402,6 +411,7 @@ def train_and_save(grid_lag=0):
             tr = np.intersect1d(idx_tr, np.where(valid)[0])
             vl = np.intersect1d(idx_vl, np.where(valid)[0])
             te = np.intersect1d(idx_te, np.where(valid)[0])
+            roll = np.intersect1d(idx_roll, np.where(valid)[0])
             idx_tv = np.concatenate([tr, vl])
 
             X_tv = X_season[idx_tv]
@@ -413,7 +423,8 @@ def train_and_save(grid_lag=0):
                 params = PARAMS_DRY.copy() if season == 'dry' else PARAMS_WET.copy()
 
             print(f"  {var_name}/{season}: {strategy} → "
-                  f"Train={len(tr)}, Val={len(vl)}, Test={len(te)}, TV={len(idx_tv)}")
+                  f"Train={len(tr)}, Val={len(vl)}, Test={len(te)}, "
+                  f"RollingTest={len(roll)}, TV={len(idx_tv)}")
 
             # ── Final model (train on full train+val for inference) ──
             model = XGBRegressor(**params)
@@ -455,7 +466,22 @@ def train_and_save(grid_lag=0):
                 print(f"    Test: R2={r2:.4f}, MAE={mae:.1f} MW")
                 test_pred = y_pred_abs
             else:
+                r2 = float('nan')
+                mae = float('nan')
                 test_pred = np.array([])
+
+            if len(roll) > 0:
+                y_pred_resid_roll = model.predict(X_season[roll])
+                if var_name in ('solar', 'wind'):
+                    y_pred_abs_roll = y_pred_resid_roll
+                else:
+                    y_pred_abs_roll = y_pred_resid_roll + lag_anchor[roll]
+                rolling_r2 = r2_score(y_abs[roll], y_pred_abs_roll)
+                rolling_mae = mean_absolute_error(y_abs[roll], y_pred_abs_roll)
+                print(f"    RollingTest: R2={rolling_r2:.4f}, MAE={rolling_mae:.1f} MW")
+            else:
+                rolling_r2 = float('nan')
+                rolling_mae = float('nan')
 
             # Store for charting
             if var_name not in chart_data:
@@ -467,6 +493,8 @@ def train_and_save(grid_lag=0):
                 'feat_imp': model.feature_importances_,
                 'r2': r2 if len(te) > 0 else float('nan'),
                 'mae': mae if len(te) > 0 else float('nan'),
+                'rolling_r2': rolling_r2,
+                'rolling_mae': rolling_mae,
                 'strategy': strategy,
             }
 
