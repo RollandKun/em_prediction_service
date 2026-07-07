@@ -36,6 +36,7 @@ import sys
 import io
 import json
 import argparse
+import time
 import warnings
 from pathlib import Path
 from datetime import date, datetime, timedelta
@@ -81,6 +82,9 @@ HOURLY_VARS = [
 FORECAST_URL = "https://api.open-meteo.com/v1/ecmwf"           # ECMWF IFS 预报
 ARCHIVE_URL  = "https://archive-api.open-meteo.com/v1/archive" # ECMWF IFS 历史
 
+FORECAST_RETRY_DELAYS = (30, 90, 180)
+ARCHIVE_RETRY_DELAYS = (10, 30, 60)
+
 
 # ====================================================================
 # Open-Meteo 客户端（单例，全局复用缓存）
@@ -111,6 +115,26 @@ def _extract_lats_lons() -> tuple:
     lats = [node["lat"] for node in NODES]
     lons = [node["lon"] for node in NODES]
     return lats, lons
+
+
+def _weather_api_with_retry(client, url: str, params: dict, label: str,
+                            retry_delays=FORECAST_RETRY_DELAYS):
+    """Call Open-Meteo with slower retries for transient 5xx failures."""
+    attempts = len(retry_delays) + 1
+    last_exc = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return client.weather_api(url, params=params)
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= attempts:
+                break
+            delay = retry_delays[attempt - 1]
+            print(f"  [Open-Meteo] {label} 失败 "
+                  f"({attempt}/{attempts}) — {exc}")
+            print(f"  [Open-Meteo] {delay}s 后重试...")
+            time.sleep(delay)
+    raise last_exc
 
 
 def _build_time_index(hourly) -> pd.DatetimeIndex:
@@ -311,7 +335,10 @@ def fetch_weather_obs(
     }
 
     print(f"  [Open-Meteo] 请求 archive API ({len(NODES)} 节点, {date_str})")
-    responses = client.weather_api(ARCHIVE_URL, params=params)
+    responses = _weather_api_with_retry(
+        client, ARCHIVE_URL, params, "archive API",
+        retry_delays=ARCHIVE_RETRY_DELAYS,
+    )
     print(f"  [Open-Meteo] 成功 — 返回 {len(responses)} 个节点数据")
 
     # 构造时间轴 + 解析数据
@@ -358,7 +385,10 @@ def fetch_weather_forecast(
     }
 
     print(f"  [Open-Meteo] 请求 forecast API ({len(NODES)} 节点)")
-    responses = client.weather_api(FORECAST_URL, params=params)
+    responses = _weather_api_with_retry(
+        client, FORECAST_URL, params, "forecast API",
+        retry_delays=FORECAST_RETRY_DELAYS,
+    )
     print(f"  [Open-Meteo] 成功 — 返回 {len(responses)} 个节点数据")
 
     # 构造时间轴 + 解析数据
@@ -430,7 +460,10 @@ def backfill_obs(
             "timezone":   "Asia/Shanghai",
         }
 
-        responses = client.weather_api(ARCHIVE_URL, params=params)
+        responses = _weather_api_with_retry(
+            client, ARCHIVE_URL, params, "archive backfill API",
+            retry_delays=ARCHIVE_RETRY_DELAYS,
+        )
         print(f"  [Backfill] 返回 {len(responses)} 个节点数据")
 
         time_index = _build_time_index(responses[0].Hourly())
