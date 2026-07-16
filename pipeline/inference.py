@@ -31,9 +31,10 @@ from config import settings
 
 MODEL_DIR = Path(settings.model_dir)
 FEAT_DIR = PROJECT_ROOT / "pipeline" / "output"
+STAGE1_VARIABLES = ('solar', 'hydro', 'wind', 'load')
+SEASONS = ('dry', 'wet')
+STAGE2_SEGMENTS = ('valley', 'peak', 'base')
 
-# Stage2 models (local project)
-_STAGE2_MODEL_DIR = MODEL_DIR
 _STAGE2_OOF = FEAT_DIR / "price_oof.npz"
 
 
@@ -45,8 +46,8 @@ def _load_s1_for_lag(grid_lag=0):
     """Load Stage1 models for a specific grid_lag value."""
     lag_suffix = f"_lag{grid_lag}" if grid_lag > 0 else ""
     models = {}
-    for var in ['solar', 'hydro', 'wind', 'load']:
-        for season in ['dry', 'wet']:
+    for var in STAGE1_VARIABLES:
+        for season in SEASONS:
             key = f"{var}_{season}"
             path = MODEL_DIR / f"stage1_{var}_{season}{lag_suffix}.pkl"
             if path.exists():
@@ -66,10 +67,10 @@ def _load_s2_for_lag(grid_lag=0):
     """Load Stage2 models for a specific grid_lag value."""
     lag_suffix = f"_lag{grid_lag}" if grid_lag > 0 else ""
     models = {}
-    for season in ['dry', 'wet']:
-        for seg in ['valley', 'peak', 'base']:
+    for season in SEASONS:
+        for seg in STAGE2_SEGMENTS:
             key = f"{seg}_{season}"
-            path = _STAGE2_MODEL_DIR / f"price_{seg}_{season}{lag_suffix}.pkl"
+            path = MODEL_DIR / f"price_{seg}_{season}{lag_suffix}.pkl"
             if path.exists():
                 with open(path, 'rb') as f:
                     obj = pickle.load(f)
@@ -97,33 +98,9 @@ def load_stage2_models():
     return _load_s2_for_lag(grid_lag=0)
 
 
-def load_all_model_sets():
-    """Load both normal and lag_192 model sets. Returns dict keyed by grid_lag."""
-    sets = {}
-    for gl in [0, 192]:
-        s1 = _load_s1_for_lag(grid_lag=gl)
-        s2 = _load_s2_for_lag(grid_lag=gl)
-        if len(s1) >= 4 and len(s2) >= 3:  # at least partial
-            sets[gl] = {'s1': s1, 's2': s2}
-            logger.info(f"  Model set grid_lag={gl}: S1={len(s1)}, S2={len(s2)}")
-        else:
-            logger.warning(f"  Model set grid_lag={gl}: insufficient models "
-                          f"(S1={len(s1)}, S2={len(s2)}) — skipping")
-    return sets
-
-
-def detect_grid_freshness(dt_arr):
-    """Determine grid_lag needed based on data recency.
-
-    Returns the smallest grid_lag for which we have models, or 0 if normal is viable.
-    dt_arr[-1] should be the last timestamp with valid grid data.
-    """
-    if dt_arr is None or len(dt_arr) == 0:
-        return 0
-    last_dt = pd.Timestamp(dt_arr[-1])
-    hours_behind = (pd.Timestamp.now() - last_dt).total_seconds() / 3600
-    logger.info(f"  Grid freshness: last_data={last_dt}, hours_behind={hours_behind:.1f}h")
-    return hours_behind
+def load_model_set(grid_lag=0):
+    """Load the Stage1 and Stage2 models for one grid lag variant."""
+    return _load_s1_for_lag(grid_lag), _load_s2_for_lag(grid_lag)
 
 
 # ====================================================================
@@ -140,7 +117,7 @@ def predict_stage1(models, X_full, feat_names, season):
     preds = {}
 
     t0 = time.time()
-    for var in ['solar', 'hydro', 'wind', 'load']:
+    for var in STAGE1_VARIABLES:
         key = f"{var}_{season}"
         if key not in models:
             logger.warning(f"  predict_stage1: {key} not in loaded models → all NaN")
@@ -174,7 +151,7 @@ def predict_stage1(models, X_full, feat_names, season):
             preds[var] = resid
 
     # Log per-variable stats
-    for var in ['solar', 'hydro', 'wind', 'load']:
+    for var in STAGE1_VARIABLES:
         a = preds[var]
         valid = ~np.isnan(a)
         if valid.any():
@@ -185,7 +162,7 @@ def predict_stage1(models, X_full, feat_names, season):
             logger.warning(f"  S1 {var}/{season}: ALL NaN — model missing or failed")
 
     logger.info(f"  Stage1 {season}: done ({time.time()-t0:.1f}s)")
-    return preds['solar'], preds['hydro'], preds['wind'], preds['load']
+    return tuple(preds[var] for var in STAGE1_VARIABLES)
 
 
 # ====================================================================
@@ -298,16 +275,16 @@ def price_anchor_from_lags(price, lags=(96, 672)):
     return anchor, lag96, lag672
 
 
-def _stage2_guard_policy(models, season):
+def stage2_guard_policy(models, season):
     """Read serving fallback/blend policy from Stage2 model metadata."""
-    for seg in ['valley', 'peak', 'base']:
+    for seg in STAGE2_SEGMENTS:
         info = models.get(f"{seg}_{season}")
         if isinstance(info, dict) and isinstance(info.get('guard_policy'), dict):
             return info['guard_policy']
     return {'enabled': False, 'mode': 'model', 'reason': 'no_guard_policy'}
 
 
-def _apply_stage2_guard(price_model, anchor, lag96, policy):
+def apply_stage2_guard(price_model, anchor, lag96, policy):
     """Apply recent-performance guard to a season prediction slice."""
     mode = policy.get('mode', 'model') if policy else 'model'
     if not policy or not policy.get('enabled') or mode == 'model':
@@ -333,6 +310,88 @@ def _apply_stage2_guard(price_model, anchor, lag96, policy):
     )
     guarded = np.where(~finite_model & finite_base, baseline, guarded)
     return guarded
+
+
+def predict_from_features(models_s1, models_s2, X_full, feat_names, period,
+                          price, dry_mask, wet_mask, dt_arr,
+                          anchor_lags=(96, 672), log_label=""):
+    """Run the shared Stage1 -> Stage2 inference path for a feature matrix."""
+    if not models_s2:
+        raise RuntimeError("No Stage2 models loaded")
+
+    n = X_full.shape[0]
+    dry_mask, wet_mask = season_masks_for_inference(dry_mask, wet_mask, dt_arr)
+    season_masks = {'dry': dry_mask, 'wet': wet_mask}
+    stage1 = {var: np.full(n, np.nan) for var in STAGE1_VARIABLES}
+
+    for season, mask in season_masks.items():
+        predictions = predict_stage1(models_s1, X_full, feat_names, season)
+        for var, values in zip(STAGE1_VARIABLES, predictions):
+            stage1[var][mask] = values[mask]
+
+    for var, values in stage1.items():
+        nan_count = np.isnan(values).sum()
+        if nan_count:
+            logger.warning(f"  Stage1 {log_label}{var}: {nan_count} NaN -> filled with 0")
+            values[np.isnan(values)] = 0.0
+
+    first_stage2 = next(iter(models_s2.values()))
+    safe_indices = (first_stage2.get('safe_indices')
+                    if isinstance(first_stage2, dict) else None)
+    X_stage2 = build_stage2_features(
+        X_full, feat_names,
+        stage1['solar'], stage1['hydro'], stage1['wind'], stage1['load'],
+        period, safe_indices=safe_indices,
+    )
+    anchor, lag96, lag672 = price_anchor_from_lags(price, lags=anchor_lags)
+    price_pred = np.full(n, np.nan)
+
+    for season, mask in season_masks.items():
+        idx = np.where(mask)[0]
+        if not len(idx):
+            continue
+
+        segment_predictions = {}
+        for segment in STAGE2_SEGMENTS:
+            key = f"{segment}_{season}"
+            model_info = models_s2.get(key)
+            if model_info is None:
+                logger.warning(f"  S2 {log_label}{key}: model missing -> using zeros")
+                segment_predictions[segment] = np.zeros(len(idx))
+                continue
+            model = model_info['model'] if isinstance(model_info, dict) else model_info
+            segment_predictions[segment] = model.predict(X_stage2[idx])
+
+        weights = blend_weights(period[idx])
+        blended = (
+            weights[:, 0] * segment_predictions['valley']
+            + weights[:, 1] * segment_predictions['peak']
+            + weights[:, 2] * segment_predictions['base']
+        )
+        raw_price = anchor[idx] + blended
+        guard_policy = stage2_guard_policy(models_s2, season)
+        price_pred[idx] = apply_stage2_guard(
+            raw_price, anchor[idx], lag96[idx], guard_policy)
+        if guard_policy.get('enabled'):
+            logger.info(f"  S2 {log_label}{season}: guard={guard_policy.get('mode')} "
+                        f"reason={guard_policy.get('reason')}")
+
+    resid_pred = price_pred - anchor
+    nan_count = np.isnan(price_pred).sum()
+    if nan_count:
+        logger.warning(f"  {log_label}price_pred: {nan_count} NaN -> filled with 0")
+        price_pred[np.isnan(price_pred)] = 0.0
+
+    return {
+        'price_pred': price_pred,
+        'resid_pred': resid_pred,
+        'anchor': anchor,
+        'price_lag96': lag96,
+        'price_lag672': lag672,
+        'dry_mask': dry_mask,
+        'wet_mask': wet_mask,
+        'stage1': stage1,
+    }
 
 
 # ====================================================================
@@ -362,10 +421,7 @@ def run_inference(grid_lag=0):
     feat_names = data['feat_names']
     period = data['period']
     price = data['price']
-    dry_mask = data['dry_mask']
-    wet_mask = data['wet_mask']
     dt_arr = data['dt']
-    dry_mask, wet_mask = season_masks_for_inference(dry_mask, wet_mask, dt_arr)
 
     n = X_full.shape[0]
     logger.info(f"  Features: {n} rows × {X_full.shape[1]} dims  "
@@ -373,101 +429,28 @@ def run_inference(grid_lag=0):
 
     # 2. Load models
     t0 = time.time()
-    m1 = _load_s1_for_lag(grid_lag=grid_lag)
-    m2 = _load_s2_for_lag(grid_lag=grid_lag)
+    m1, m2 = load_model_set(grid_lag)
     logger.info(f"  Models: S1={len(m1)}, S2={len(m2)}  ({time.time()-t0:.1f}s)")
 
-    # 3. Stage1
-    t0 = time.time()
-    oof_s = np.full(n, np.nan); oof_h = np.full(n, np.nan)
-    oof_w = np.full(n, np.nan); oof_l = np.full(n, np.nan)
-
-    for season, mask in [('dry', dry_mask), ('wet', wet_mask)]:
-        s, h, w, l = predict_stage1(m1, X_full, feat_names, season)
-        oof_s[mask] = s[mask]; oof_h[mask] = h[mask]
-        oof_w[mask] = w[mask]; oof_l[mask] = l[mask]
-
-    for name, a in [('solar', oof_s), ('hydro', oof_h), ('wind', oof_w), ('load', oof_l)]:
-        nan_n = np.isnan(a).sum()
-        if nan_n > 0:
-            logger.warning(f"  Stage1 {name}: {nan_n} NaN OOF → filled with 0")
-        a[np.isnan(a)] = 0.0
-
-    print(f"    Solar: mean={np.mean(oof_s):.0f} MW")
-    print(f"    Hydro: mean={np.mean(oof_h):.0f} MW")
-    print(f"    Wind:  mean={np.mean(oof_w):.0f} MW")
-    print(f"    Load:  mean={np.mean(oof_l):.0f} MW")
-
-    # 4. Stage2 — use feature indices from training metadata
-    t0 = time.time()
-    if not m2:
-        logger.error("No Stage2 models loaded — cannot run inference")
-        raise RuntimeError("No Stage2 models loaded")
-    first_m2 = next(iter(m2.values()))
-    safe_idx = first_m2.get('safe_indices') if isinstance(first_m2, dict) else None
-    X_s2 = build_stage2_features(X_full, feat_names, oof_s, oof_h, oof_w, oof_l,
-                                  period, safe_indices=safe_idx)
-    logger.info(f"  Stage2 input: {X_s2.shape[1]} dims  ({time.time()-t0:.1f}s)")
-
     anchor_lags = (grid_lag, 672) if grid_lag > 0 else (96, 672)
-    anchor, lag96, lag672 = price_anchor_from_lags(price, lags=anchor_lags)
-
-    price_pred = np.full(n, np.nan)
-    resid_pred = np.full(n, np.nan)
-
-    for season, mask in [('dry', dry_mask), ('wet', wet_mask)]:
-        idx = np.where(mask)[0]
-        if len(idx) == 0: continue
-
-        is_dry = (season == 'dry')
-        seg_preds = {}
-        for seg in ['valley', 'peak', 'base']:
-            key = f"{seg}_{season}"
-            if key in m2:
-                m = m2[key]
-                model = m['model'] if isinstance(m, dict) else m
-                seg_preds[seg] = model.predict(X_s2[idx])
-            else:
-                logger.warning(f"  S2 {key}: model missing → using zeros")
-                seg_preds[seg] = np.zeros(len(idx))
-
-        w = blend_weights(period[idx])
-        blended = (w[:, 0] * seg_preds['valley'] +
-                   w[:, 1] * seg_preds['peak'] +
-                   w[:, 2] * seg_preds['base'])
-
-        # Both seasons use residual strategy: price = anchor + resid
-        raw_price = anchor[idx] + blended
-        guard_policy = _stage2_guard_policy(m2, season)
-        guarded_price = _apply_stage2_guard(raw_price, anchor[idx], lag96[idx],
-                                            guard_policy)
-        price_pred[idx] = guarded_price
-        resid_pred[idx] = guarded_price - anchor[idx]
-
-        if guard_policy.get('enabled'):
-            logger.info(f"  S2 {season}: guard={guard_policy.get('mode')} "
-                        f"reason={guard_policy.get('reason')}")
-
-        # Per-season summary
-        valid_p = ~np.isnan(price_pred[idx])
-        if valid_p.any():
-            logger.info(f"  S2 {season}: pred mean={price_pred[idx][valid_p].mean():.1f} "
-                       f"range=[{price_pred[idx][valid_p].min():.1f}, "
-                       f"{price_pred[idx][valid_p].max():.1f}]")
-
-    nan_price = np.isnan(price_pred).sum()
-    if nan_price > 0:
-        logger.warning(f"  price_pred: {nan_price} NaN → filled with 0")
-    price_pred[np.isnan(price_pred)] = 0.0
+    result = predict_from_features(
+        m1, m2, X_full, feat_names, period, price,
+        data['dry_mask'], data['wet_mask'], dt_arr,
+        anchor_lags=anchor_lags,
+        log_label=f"lag{grid_lag} " if grid_lag else "",
+    )
     logger.info(f"  Inference done: {time.time()-t_total:.1f}s total")
 
-    return {
-        'price_pred': price_pred, 'resid_pred': resid_pred,
-        'price': price, 'price_lag96': lag96, 'anchor': anchor,
-        'oof_s': oof_s, 'oof_h': oof_h, 'oof_w': oof_w, 'oof_l': oof_l,
-        'dry_mask': dry_mask, 'wet_mask': wet_mask,
-        'dt': dt_arr, 'period': period,
-    }
+    result.update({
+        'price': price,
+        'dt': dt_arr,
+        'period': period,
+        'oof_s': result['stage1']['solar'],
+        'oof_h': result['stage1']['hydro'],
+        'oof_w': result['stage1']['wind'],
+        'oof_l': result['stage1']['load'],
+    })
+    return result
 
 
 # ====================================================================
@@ -503,7 +486,7 @@ def verify(result):
     print(f"    Valid points: {valid.sum():,}")
     print(f"    MAE:  {mae:.2f} 元/MWh")
     print(f"    Max:  {max_d:.2f} 元/MWh")
-    print(f"    R²:   {r2:.4f}")
+    print(f"    R2:   {r2:.4f}")
 
     for season, smask in [('dry', ref['dry_mask']), ('wet', ref['wet_mask'])]:
         sv = valid & smask.astype(bool)
@@ -511,10 +494,11 @@ def verify(result):
             s_mae = np.mean(np.abs(ref_price[sv] - our_price[sv]))
             s_r2 = 1 - np.sum((ref_price[sv] - our_price[sv]) ** 2) / max(
                 np.sum((ref_price[sv] - np.mean(ref_price[sv])) ** 2), 1e-10)
-            print(f"    {season}: MAE={s_mae:.2f}, R²={s_r2:.4f}, n={sv.sum():,}")
+            print(f"    {season}: MAE={s_mae:.2f}, R2={s_r2:.4f}, n={sv.sum():,}")
 
     ok = mae < 50.0
-    print(f"\n  {'[OK]' if ok else '[WARN]'} Verification {'passed' if ok else '— significant deviation'}")
+    status = 'passed' if ok else '- significant deviation'
+    print(f"\n  {'[OK]' if ok else '[WARN]'} Verification {status}")
     return ok
 
 

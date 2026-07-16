@@ -70,9 +70,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from config import settings
 from pipeline.inference import (
-    load_stage1_models, load_stage2_models,
-    predict_stage1, build_stage2_features, blend_weights,
-    season_masks_for_inference, price_anchor_from_lags,
+    load_model_set, predict_from_features,
 )
 
 from api.schemas import (
@@ -158,8 +156,7 @@ async def lifespan(app: FastAPI):
 
     # ── Load models ──
     t3 = time.time()
-    state["models_s1"] = load_stage1_models()
-    state["models_s2"] = load_stage2_models()
+    state["models_s1"], state["models_s2"] = load_model_set()
     n_s1, n_s2 = len(state["models_s1"]), len(state["models_s2"])
     s1_keys = sorted(state["models_s1"].keys())
     s2_keys = sorted(state["models_s2"].keys())
@@ -198,9 +195,7 @@ async def lifespan(app: FastAPI):
     lag_feat_path = PROJECT_ROOT / "pipeline" / "output" / "features_15min_dry_lag192.npz"
     if lag_feat_path.exists():
         lag_data = np.load(lag_feat_path, allow_pickle=True)
-        from pipeline.inference import _load_s1_for_lag, _load_s2_for_lag
-        state["models_s1_lag"] = _load_s1_for_lag(grid_lag=192)
-        state["models_s2_lag"] = _load_s2_for_lag(grid_lag=192)
+        state["models_s1_lag"], state["models_s2_lag"] = load_model_set(192)
         n_s1l, n_s2l = len(state["models_s1_lag"]), len(state["models_s2_lag"])
 
         if n_s1l >= 4 and n_s2l >= 3:
@@ -233,62 +228,13 @@ async def lifespan(app: FastAPI):
 def _precompute_predictions(m1, m2, X_full, feat_names, period, price,
                            dry_mask, wet_mask, dt_arr, anchor_lags=(96, 672)):
     """Run full inference and cache by date. Skips dates already in cache."""
-    n = X_full.shape[0]
-    dry_mask, wet_mask = season_masks_for_inference(dry_mask, wet_mask, dt_arr)
-
-    # Stage1
-    oof_s = np.full(n, np.nan); oof_h = np.full(n, np.nan)
-    oof_w = np.full(n, np.nan); oof_l = np.full(n, np.nan)
-
-    for season, mask in [('dry', dry_mask), ('wet', wet_mask)]:
-        s, h, w, l = predict_stage1(m1, X_full, feat_names, season)
-        oof_s[mask] = s[mask]; oof_h[mask] = h[mask]
-        oof_w[mask] = w[mask]; oof_l[mask] = l[mask]
-    for name, a in [('solar', oof_s), ('hydro', oof_h), ('wind', oof_w), ('load', oof_l)]:
-        nan_count = np.isnan(a).sum()
-        if nan_count > 0:
-            logger.warning(f"  Stage1 {name}: {nan_count} NaN OOF → filled with 0")
-        a[np.isnan(a)] = 0.0
-
-    # Stage2 — use feature indices from training metadata
-    if not m2:
-        logger.error("No Stage2 models loaded — cannot run inference")
-        return
-    first_m2 = next(iter(m2.values()))
-    safe_idx = first_m2.get('safe_indices') if isinstance(first_m2, dict) else None
-    X_s2 = build_stage2_features(X_full, feat_names, oof_s, oof_h, oof_w, oof_l,
-                                  period, safe_indices=safe_idx)
-
-    anchor, _, _ = price_anchor_from_lags(price, lags=anchor_lags)
-
-    price_pred = np.full(n, np.nan)
-
-    for season, mask in [('dry', dry_mask), ('wet', wet_mask)]:
-        idx = np.where(mask)[0]
-        if len(idx) == 0: continue
-
-        seg_preds = {}
-        for seg in ['valley', 'peak', 'base']:
-            key = f"{seg}_{season}"
-            if key in m2:
-                m = m2[key]
-                model = m['model'] if isinstance(m, dict) else m
-                seg_preds[seg] = model.predict(X_s2[idx])
-            else:
-                seg_preds[seg] = np.zeros(len(idx))
-
-        w = blend_weights(period[idx])
-        blended = (w[:, 0] * seg_preds['valley'] +
-                   w[:, 1] * seg_preds['peak'] +
-                   w[:, 2] * seg_preds['base'])
-
-        price_pred[idx] = anchor[idx] + blended  # residual + anchor (unified)
-
-    # Cache by date
-    nan_price = np.isnan(price_pred).sum()
-    if nan_price > 0:
-        logger.warning(f"  price_pred: {nan_price} NaN values → filled with 0")
-    price_pred[np.isnan(price_pred)] = 0.0
+    result = predict_from_features(
+        m1, m2, X_full, feat_names, period, price,
+        dry_mask, wet_mask, dt_arr, anchor_lags=anchor_lags,
+        log_label="lag192 " if anchor_lags[0] == 192 else "",
+    )
+    price_pred = result['price_pred']
+    n = len(price_pred)
 
     for i in range(n):
         # Cache by TARGET date (dt + 24h), not input date.

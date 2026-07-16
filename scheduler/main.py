@@ -86,6 +86,38 @@ def _fetch_weather_obs_for_date(target_date: date) -> dict:
                 'elapsed': round(elapsed, 1)}
 
 
+def _replace_predictions(records: list, model_version: str) -> int:
+    """Replace prediction rows for the affected dates and model version."""
+    if not records:
+        return 0
+
+    import pandas as pd
+    from sqlalchemy import create_engine, text
+
+    engine = create_engine(settings.database_url_sync, echo=False)
+    target_dates = sorted({
+        pd.Timestamp(record['target_time']).date() for record in records
+    })
+    try:
+        with engine.begin() as conn:
+            for target_date in target_dates:
+                conn.execute(
+                    text("DELETE FROM predictions "
+                         "WHERE target_time::date = :d "
+                         "AND model_version = :model_version"),
+                    {'d': target_date, 'model_version': model_version},
+                )
+            conn.execute(
+                text("INSERT INTO predictions "
+                     "(target_time, predicted_price, model_version, season, period) "
+                     "VALUES (:target_time, :predicted_price, :model_version, :season, :period)"),
+                records,
+            )
+    finally:
+        engine.dispose()
+    return len(records)
+
+
 # ====================================================================
 # 任务函数定义（每个任务 = 一个独立可调用的函数，返回 dict 结果）
 # ====================================================================
@@ -207,7 +239,6 @@ def job_daily_inference() -> dict:
     try:
         import numpy as np
         import pandas as pd
-        from sqlalchemy import create_engine, text
 
         # 1. 从 DB 重新构建特征（确保使用最新数据）
         logger.info("  [inference] 构建特征矩阵...")
@@ -237,78 +268,19 @@ def job_daily_inference() -> dict:
         # 2. 加载模型
         logger.info("  [inference] 加载模型...")
         from pipeline.inference import (
-            load_stage1_models, load_stage2_models,
-            predict_stage1, build_stage2_features, blend_weights,
-            season_masks_for_inference, price_anchor_from_lags,
-            _stage2_guard_policy, _apply_stage2_guard,
+            load_model_set, predict_from_features,
         )
 
-        dry_mask, wet_mask = season_masks_for_inference(dry_mask, wet_mask, dt_arr)
-
-        m1 = load_stage1_models()
-        m2 = load_stage2_models()
-        fnames = list(feat_names_arr)
-
-        # 3. Stage1 预测（4 变量 × 2 季节）
-        oof_s = np.full(n, np.nan); oof_h = np.full(n, np.nan)
-        oof_w = np.full(n, np.nan); oof_l = np.full(n, np.nan)
-
-        for season, mask in [('dry', dry_mask), ('wet', wet_mask)]:
-            s, h, w, l = predict_stage1(m1, X, fnames, season)
-            oof_s[mask] = s[mask]; oof_h[mask] = h[mask]
-            oof_w[mask] = w[mask]; oof_l[mask] = l[mask]
-        for name, a in [('solar', oof_s), ('hydro', oof_h), ('wind', oof_w), ('load', oof_l)]:
-            nan_count = np.isnan(a).sum()
-            if nan_count > 0:
-                logger.warning(f"  Stage1 {name}: {nan_count} NaN OOF → filled with 0")
-            a[np.isnan(a)] = 0.0
-
-        # 4. Stage2 预测（使用训练时保存的特征索引）
-        if not m2:
-            logger.error("No Stage2 models loaded — cannot run inference")
-            return {'ok': False, 'error': 'No Stage2 models loaded'}
-        first_m2 = next(iter(m2.values()))
-        safe_idx = first_m2.get('safe_indices') if isinstance(first_m2, dict) else None
-        X_s2 = build_stage2_features(X, fnames, oof_s, oof_h, oof_w, oof_l,
-                                      period, safe_indices=safe_idx)
-
-        anchor, lag96, _ = price_anchor_from_lags(price)
-
-        price_pred = np.full(n, np.nan)
-        for season, mask in [('dry', dry_mask), ('wet', wet_mask)]:
-            idx = np.where(mask)[0]
-            if len(idx) == 0: continue
-            seg_preds = {}
-            for seg in ['valley', 'peak', 'base']:
-                key = f"{seg}_{season}"
-                if key in m2:
-                    m = m2[key]
-                    model = m['model'] if isinstance(m, dict) else m
-                    seg_preds[seg] = model.predict(X_s2[idx])
-                else:
-                    seg_preds[seg] = np.zeros(len(idx))
-            w = blend_weights(period[idx])
-            blended = (w[:, 0] * seg_preds['valley'] +
-                       w[:, 1] * seg_preds['peak'] +
-                       w[:, 2] * seg_preds['base'])
-            raw_price = anchor[idx] + blended
-            guard_policy = _stage2_guard_policy(m2, season)
-            price_pred[idx] = _apply_stage2_guard(raw_price, anchor[idx], lag96[idx],
-                                                  guard_policy)
-            if guard_policy.get('enabled'):
-                logger.info(f"  S2 {season}: guard={guard_policy.get('mode')} "
-                            f"reason={guard_policy.get('reason')}")
-
-        nan_price = np.isnan(price_pred).sum()
-        if nan_price > 0:
-            logger.warning(f"  price_pred: {nan_price} NaN values → filled with 0")
-        price_pred[np.isnan(price_pred)] = 0.0
+        m1, m2 = load_model_set()
+        prediction_result = predict_from_features(
+            m1, m2, X, feat_names_arr, period, price,
+            dry_mask, wet_mask, dt_arr,
+        )
+        price_pred = prediction_result['price_pred']
+        dry_mask = prediction_result['dry_mask']
         logger.info(f"  [inference] 价格预测: mean={np.mean(price_pred):.1f} 元/MWh")
 
         # 5. 写入 predictions 表（最后 96 行 = 最新完整天）
-        url = settings.database_url_sync
-        engine = create_engine(url, echo=False)
-
         if n >= 96:
             last_preds = price_pred[-96:]
             last_dt = dt_arr[-96:]
@@ -326,28 +298,8 @@ def job_daily_inference() -> dict:
                     'period': int(period[n - 96 + i]),
                 })
 
-            with engine.connect() as conn:
-                with conn.begin():
-                    target_dates = sorted({
-                        pd.Timestamp(r['target_time']).date() for r in records
-                    })
-                    for target_date in target_dates:
-                        conn.execute(
-                            text("DELETE FROM predictions "
-                                 "WHERE target_time::date = :d "
-                                 "AND model_version = :model_version"),
-                            {'d': target_date, 'model_version': settings.feature_version},
-                        )
-                    conn.execute(
-                        text("INSERT INTO predictions "
-                             "(target_time, predicted_price, model_version, season, period) "
-                             "VALUES (:target_time, :predicted_price, :model_version, :season, :period)"),
-                        records,
-                    )
-                    conn.commit()
-            logger.info(f"  [inference] 写入 {len(records)} 条预测")
-
-        engine.dispose()
+            written = _replace_predictions(records, settings.feature_version)
+            logger.info(f"  [inference] 写入 {written} 条预测")
 
         # ── 6. Gap-fill pass: forward_extend=192 + grid_lag=192 ──
         # Extend datetime 192 periods beyond grid data. New rows have NaN
@@ -356,10 +308,7 @@ def job_daily_inference() -> dict:
         logger.info("  [inference] Gap-fill pass (forward_extend=192, grid_lag=192)...")
         t_lag = time.time()
         try:
-            from pipeline.inference import _load_s1_for_lag, _load_s2_for_lag
-
-            m1_lag = _load_s1_for_lag(grid_lag=192)
-            m2_lag = _load_s2_for_lag(grid_lag=192)
+            m1_lag, m2_lag = load_model_set(192)
 
             if len(m1_lag) >= 4 and len(m2_lag) >= 3:
                 # Re-load with forward extension
@@ -376,64 +325,13 @@ def job_daily_inference() -> dict:
 
                 X_lag = result_lag['X']
                 n_lag = X_lag.shape[0]  # may be larger than n due to forward_extend
-                fnames_lag = list(result_lag['feat_names'])
                 period_lag = result_lag['period']
-                price_lag = result_lag['price']
-                dry_lag = result_lag['dry_mask']
-                wet_lag = result_lag['wet_mask']
-                dry_lag, wet_lag = season_masks_for_inference(dry_lag, wet_lag, dt_arr_lag)
-
-                oof_s_lag = np.full(n_lag, np.nan); oof_h_lag = np.full(n_lag, np.nan)
-                oof_w_lag = np.full(n_lag, np.nan); oof_l_lag = np.full(n_lag, np.nan)
-
-                for season, mask in [('dry', dry_lag), ('wet', wet_lag)]:
-                    s, h, w, l_ = predict_stage1(m1_lag, X_lag, fnames_lag, season)
-                    oof_s_lag[mask] = s[mask]; oof_h_lag[mask] = h[mask]
-                    oof_w_lag[mask] = w[mask]; oof_l_lag[mask] = l_[mask]
-                for name, a in [('solar', oof_s_lag), ('hydro', oof_h_lag),
-                               ('wind', oof_w_lag), ('load', oof_l_lag)]:
-                    nan_count = np.isnan(a).sum()
-                    if nan_count > 0:
-                        logger.warning(f"  Stage1 lag {name}: {nan_count} NaN OOF → filled with 0")
-                    a[np.isnan(a)] = 0.0
-
-                first_m2_lag = next(iter(m2_lag.values()))
-                safe_idx_lag = first_m2_lag.get('safe_indices') if isinstance(first_m2_lag, dict) else None
-                X_s2_lag = build_stage2_features(X_lag, fnames_lag, oof_s_lag, oof_h_lag,
-                                                 oof_w_lag, oof_l_lag, period_lag,
-                                                 safe_indices=safe_idx_lag)
-
-                anchor_l, lag96_l, _ = price_anchor_from_lags(price_lag, lags=(192, 672))
-
-                price_pred_lag = np.full(n_lag, np.nan)
-                for season, mask in [('dry', dry_lag), ('wet', wet_lag)]:
-                    idx = np.where(mask)[0]
-                    if len(idx) == 0: continue
-                    seg_preds_l = {}
-                    for seg in ['valley', 'peak', 'base']:
-                        key = f"{seg}_{season}"
-                        if key in m2_lag:
-                            m_l = m2_lag[key]
-                            model_l = m_l['model'] if isinstance(m_l, dict) else m_l
-                            seg_preds_l[seg] = model_l.predict(X_s2_lag[idx])
-                        else:
-                            seg_preds_l[seg] = np.zeros(len(idx))
-                    w_l = blend_weights(period_lag[idx])
-                    blended_l = (w_l[:, 0] * seg_preds_l['valley'] +
-                                 w_l[:, 1] * seg_preds_l['peak'] +
-                                 w_l[:, 2] * seg_preds_l['base'])
-                    raw_price_l = anchor_l[idx] + blended_l
-                    guard_policy_l = _stage2_guard_policy(m2_lag, season)
-                    price_pred_lag[idx] = _apply_stage2_guard(
-                        raw_price_l, anchor_l[idx], lag96_l[idx], guard_policy_l)
-                    if guard_policy_l.get('enabled'):
-                        logger.info(f"  S2 lag192 {season}: "
-                                    f"guard={guard_policy_l.get('mode')} "
-                                    f"reason={guard_policy_l.get('reason')}")
-
-                nan_price_l = np.isnan(price_pred_lag).sum()
-                if nan_price_l > 0:
-                    price_pred_lag[np.isnan(price_pred_lag)] = 0.0
+                lag_prediction_result = predict_from_features(
+                    m1_lag, m2_lag, X_lag, result_lag['feat_names'], period_lag,
+                    result_lag['price'], result_lag['dry_mask'], result_lag['wet_mask'],
+                    dt_arr_lag, anchor_lags=(192, 672), log_label="lag192 ",
+                )
+                price_pred_lag = lag_prediction_result['price_pred']
                 logger.info(f"  [inference] Lag192 价格预测: mean={np.mean(price_pred_lag):.1f}")
 
                 # Write gap-fill predictions for ALL dates beyond normal coverage.
@@ -454,7 +352,7 @@ def job_daily_inference() -> dict:
                         if 0 <= p < 96:
                             lag_target_dates[td][p] = price_pred_lag[i]
 
-                    records_written = 0
+                    all_lag_records = []
                     for td, preds in sorted(lag_target_dates.items()):
                         if td <= last_normal_date:
                             continue  # already covered by normal pass
@@ -469,26 +367,11 @@ def job_daily_inference() -> dict:
                                 'season': 'dry' if pd.Timestamp(td).month <= 4 else 'wet',
                                 'period': p,
                             })
-                        engine3 = create_engine(url, echo=False)
-                        with engine3.connect() as conn:
-                            with conn.begin():
-                                conn.execute(
-                                    text("DELETE FROM predictions "
-                                         "WHERE target_time::date = :d "
-                                         "AND model_version = :model_version"),
-                                    {'d': td, 'model_version': settings.feature_version + '_lag192'},
-                                )
-                                conn.execute(
-                                    text("INSERT INTO predictions "
-                                         "(target_time, predicted_price, model_version, season, period) "
-                                         "VALUES (:target_time, :predicted_price, :model_version, :season, :period)"),
-                                    records_lag,
-                                )
-                                conn.commit()
-                        engine3.dispose()
-                        records_written += len(records_lag)
+                        all_lag_records.extend(records_lag)
                         logger.info(f"  [inference] Lag192 gap-fill: {td} ({len(records_lag)} periods)")
 
+                    records_written = _replace_predictions(
+                        all_lag_records, settings.feature_version + '_lag192')
                     if records_written > 0:
                         logger.info(f"  [inference] Lag192 total: {records_written} gap-fill predictions")
                 logger.info(f"  [inference] Gap-fill pass done ({time.time()-t_lag:.1f}s)")

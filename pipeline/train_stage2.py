@@ -24,7 +24,7 @@ import pickle
 import argparse
 import warnings
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime
 
 import numpy as np
 import matplotlib
@@ -43,6 +43,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from config import settings
+from pipeline.inference import apply_stage2_guard
 
 # ── 路径 ──
 FEAT_DIR = PROJECT_ROOT / "pipeline" / "output"
@@ -53,8 +54,6 @@ REPORT_DIR = FEAT_DIR / "reports"
 REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
 RANDOM_SEED = 42
-FEAT_DRY = FEAT_DIR / "features_15min_dry.npz"
-FEAT_WET = FEAT_DIR / "features_15min_wet.npz"
 ROLLING_GUARD_MIN_SAMPLES = 96
 ROLLING_GUARD_MIN_IMPROVEMENT = 0.05
 ROLLING_GUARD_BLEND_MODEL_WEIGHT = 0.30
@@ -66,32 +65,6 @@ def _finite_float(value):
 
 def _round_or_none(value, ndigits=2):
     return round(float(value), ndigits) if _finite_float(value) else None
-
-
-def _apply_guard_policy(price_model, anchor, lag96, policy):
-    """Apply serving-time fallback/blend policy to a price prediction array."""
-    mode = policy.get('mode', 'model') if policy else 'model'
-    if mode == 'model':
-        return price_model.copy()
-
-    if mode == 'lag96':
-        baseline = lag96
-        weight_model = 0.0
-    elif mode == 'blend':
-        baseline_name = policy.get('baseline', 'lag96')
-        baseline = lag96 if baseline_name == 'lag96' else anchor
-        weight_model = float(policy.get('model_weight', ROLLING_GUARD_BLEND_MODEL_WEIGHT))
-    else:
-        return price_model.copy()
-
-    finite_model = np.isfinite(price_model)
-    finite_base = np.isfinite(baseline)
-    guarded = price_model.copy()
-    guarded = np.where(finite_base & finite_model,
-                       weight_model * price_model + (1.0 - weight_model) * baseline,
-                       guarded)
-    guarded = np.where(finite_base & ~finite_model, baseline, guarded)
-    return guarded
 
 
 def _build_guard_policy(season_name, rolling_ev, baseline_rolling):
@@ -587,7 +560,8 @@ def train_one_season(X, y_abs, anchor, price_lag96,
     print(f"  RollingTest基线 lag96:         MAE={bl_rolling['MAE_lag96']:.2f}")
 
     guard_policy = _build_guard_policy(season_name, roll_ev, bl_rolling)
-    price_pred_serving = _apply_guard_policy(price_pred, anchor, price_lag96, guard_policy)
+    price_pred_serving = apply_stage2_guard(
+        price_pred, anchor, price_lag96, guard_policy)
     resid_pred_serving = price_pred_serving - anchor
     guarded_roll_ev = evaluate(idx_rolling_test, 'RollingTestGuarded',
                                pred=price_pred_serving, emit=False)
